@@ -113,6 +113,14 @@ If **Test with Salesforce** shows "retry your request", the new Connected App is
   - **Team**: invite people, change roles, switch people off. A switched-off person is signed out at once and cannot sign in.
 - **Inviting someone**: Settings → Team → enter email and role → **Invite**. If email is set up, the invitation is emailed. The link is also shown once, so you can copy it and send it yourself (for example if the email does not arrive). It works 7 days, and works once. The person opens it, picks a name and password, and joins your company.
 
+### Forgot password
+
+- On the sign-in page, click **Forgot password?**, enter the email, and an email with a link is sent. The page gives the same answer whether or not an account exists, so nobody can use it to find out who has an account.
+- The link works **once** and for **1 hour**. Only one email per minute is sent for an account. Switched-off people get no email.
+- Choosing a new password **signs the person out everywhere** (all other browsers and devices). They then sign in with the new password. Older reset links stop working too.
+- It needs email to be set up (see above). Without it, the page says so. If the only admin is locked out and email is not set up, use `npm run create-admin` (section 2).
+- Reset requests and completed resets appear in the **Activity log**.
+
 ### What the run status means
 
 - **Succeeded**: every item was copied, re-read, and the checksum matched.
@@ -133,7 +141,7 @@ The one shared Connected App must be usable in each customer org. Salesforce may
 
 ## 7. Checks that were done
 
-- Backend: 62 automated tests pass (login, encryption, connect flow, backup, honest status, settings, team invites, retention, dashboard, email settings, failure alerts, invitation email). They use a **fake Salesforce** and a **fake mail server**.
+- Backend: 69 automated tests pass (login, encryption, connect flow, backup, honest status, settings, team invites, retention, dashboard, email settings, failure alerts, invitation email, password reset). They use a **fake Salesforce** and a **fake mail server**.
 - Email: the screens were opened in a browser and the error messages checked against a mail server that refuses connections. **No real email has been sent yet.** Please press **Send a test email** with your provider's details.
 - Frontend: type check and build pass. Screens were opened in a browser, including phone width.
 - Against real Salesforce: the app was tested only with a fake Client ID. Salesforce answered that it does not recognise it, and the app showed a clear message. **A full backup of a real org has not been run yet.** It needs your Connected App. Please run a first backup on your Developer org and read the run details.
@@ -145,5 +153,5 @@ The one shared Connected App must be usable in each customer org. Salesforce may
 - Some data is not copied, and each is listed with its reason: managed-package metadata, binary and compound fields, and some system objects. See **What a backup covers** on the org page.
 - Backups run inside the app server process. For many customers, move them to a separate worker later.
 - Storage is the server's disk. Object storage (S3 or similar) is a later step.
-- Email covers failure alerts and invitations only. **Password reset by email is not built yet.** An alert is not retried if the mail server is down at that moment (the failure is shown in the alert list).
+- Email covers failure alerts, invitations and password reset. An owner cannot start a reset for a team member (the person asks for it on the sign-in page). An alert is not retried if the mail server is down at that moment (the failure is shown in the alert list).
 - Roles: Owner can do everything, including settings and team. Admin can connect, back up, schedule and delete orgs. Viewer can only look and download.

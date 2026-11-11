@@ -36,15 +36,17 @@ export async function loadUser(req: Request): Promise<AuthedUser | null> {
   const token = req.cookies?.[SESSION_COOKIE];
   if (!token) return null;
   try {
-    const payload = jwt.verify(token, config.jwtSecret) as { sub?: string };
+    const payload = jwt.verify(token, config.jwtSecret) as { sub?: string; iat?: number };
     if (!payload.sub) return null;
     const user = await prisma.user.findUnique({
       where: { id: payload.sub },
-      select: { id: true, email: true, name: true, role: true, isPlatformAdmin: true, tenantId: true, active: true },
+      select: { id: true, email: true, name: true, role: true, isPlatformAdmin: true, tenantId: true, active: true, passwordChangedAt: true },
     });
     // A switched-off account stops working at once, even with a valid cookie.
     if (!user || !user.active) return null;
-    const { active: _active, ...rest } = user;
+    // After a password reset, logins issued before it (for example by someone who knew the old password) stop working.
+    if (user.passwordChangedAt && (payload.iat ?? 0) < Math.floor(user.passwordChangedAt.getTime() / 1000)) return null;
+    const { active: _active, passwordChangedAt: _changed, ...rest } = user;
     return rest;
   } catch {
     return null;

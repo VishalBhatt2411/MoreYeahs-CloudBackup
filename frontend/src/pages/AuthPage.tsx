@@ -64,7 +64,7 @@ export default function AuthPage({ mode }: { mode: 'login' | 'register' }) {
         <div className="field">
           <label htmlFor="pw">Password</label>
           <input id="pw" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={isRegister ? 10 : 1} autoComplete={isRegister ? 'new-password' : 'current-password'} />
-          {isRegister && <small>At least 10 characters.</small>}
+          {isRegister ? <small>At least 10 characters.</small> : <small><Link to="/forgot-password">Forgot password?</Link></small>}
         </div>
         <button className="btn primary" style={{ width: '100%' }} disabled={busy}>
           {busy ? 'Please wait…' : isRegister ? 'Create account' : 'Sign in'}

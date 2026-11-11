@@ -92,8 +92,24 @@ model User {
   tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   createdAt       DateTime  @default(now())
   lastLoginAt     DateTime?
+  // Logins issued before this moment are refused (set when the password is reset).
+  passwordChangedAt DateTime?
+  resets          PasswordReset[]
 
   @@index([tenantId])
+}
+
+// A "forgot password" link. Only the hash of the token is stored. One use, short life.
+model PasswordReset {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  @@index([userId])
 }
 
 // One row only (id = "default"). The shared Salesforce Connected App, entered by the platform admin.

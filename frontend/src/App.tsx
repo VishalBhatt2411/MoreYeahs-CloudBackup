@@ -3,7 +3,9 @@ import { useAuth } from './auth';
 import AuditPage from './pages/Audit';
 import AuthPage from './pages/AuthPage';
 import DashboardPage from './pages/Dashboard';
+import ForgotPassword from './pages/ForgotPassword';
 import Join from './pages/Join';
+import ResetPassword from './pages/ResetPassword';
 import OrgDetail from './pages/OrgDetail';
 import Orgs from './pages/Orgs';
 import PlatformPage from './pages/Platform';
@@ -59,11 +61,20 @@ export default function App() {
   const location = useLocation();
 
   if (loading) return <div className="auth-wrap">Loading…</div>;
+  // The reset link opens the same page whether or not someone is signed in on this browser.
+  if (location.pathname.startsWith('/reset/')) {
+    return (
+      <Routes>
+        <Route path="/reset/:token" element={<ResetPassword />} />
+      </Routes>
+    );
+  }
   if (!user) {
     return (
       <Routes>
         <Route path="/login" element={<AuthPage mode="login" />} />
         <Route path="/register" element={<AuthPage mode="register" />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/join/:token" element={<Join />} />
         <Route path="*" element={<Navigate to="/login" replace state={{ from: location.pathname + location.search }} />} />
       </Routes>
@@ -76,6 +87,7 @@ export default function App() {
         <Route path="/login" element={<Navigate to="/dashboard" replace />} />
         <Route path="/register" element={<Navigate to="/dashboard" replace />} />
         <Route path="/join/:token" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/forgot-password" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/orgs" element={<Orgs />} />

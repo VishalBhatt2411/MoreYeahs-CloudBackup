@@ -12,6 +12,7 @@ export const CLIENT_SECRET = 'valid-secret-abcdefghij-0123456789';
 /** Empties every table. The next account to register becomes the platform admin. */
 export async function resetDbEmpty() {
   await prisma.auditLog.deleteMany();
+  await prisma.passwordReset.deleteMany();
   await prisma.oAuthState.deleteMany();
   await prisma.backupItem.deleteMany();
   await prisma.backupRun.deleteMany();
