@@ -35,7 +35,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           {user.isPlatformAdmin && (
             <>
               <div className="nav-label">PLATFORM</div>
-              <NavLink to="/platform">Salesforce integration</NavLink>
+              <NavLink to="/platform">Platform setup</NavLink>
             </>
           )}
         </nav>

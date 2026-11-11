@@ -44,7 +44,7 @@ Open http://localhost:5173
 
 ## 2. Make yourself the platform admin
 
-**The first account ever created on a fresh install is the platform admin automatically.** Open http://localhost:5173/register and create your account. You will see **Salesforce integration** in the menu. Every account after that is a normal customer.
+**The first account ever created on a fresh install is the platform admin automatically.** Open http://localhost:5173/register and create your account. You will see **Platform setup** in the menu. Every account after that is a normal customer.
 
 **When you host it for real: register your own account first, right after you deploy, before anyone else can reach the site.**
 
@@ -70,7 +70,20 @@ In your Developer Edition org:
 7. Save. Wait a few minutes. Salesforce is slow to activate new apps.
 8. Open the app → **Manage Consumer Details** → copy the **Consumer Key** and **Consumer Secret**.
 
-Then in CloudBackup: **Salesforce integration** → paste both → **Save** → **Test with Salesforce**.
+Then in CloudBackup: **Platform setup** → paste both → **Save** → **Test with Salesforce**.
+
+### Set up email (once, for the whole platform)
+
+Backup failure alerts and team invitations are sent as email. The platform admin enters the mail account once, on **Platform setup → Email (SMTP)**. Nothing goes in an env file.
+
+1. Get SMTP details from your email provider (Microsoft 365, Google Workspace, SendGrid, Amazon SES, your own server, and so on): host, port, user name, password.
+2. Enter them, plus the **From** address and a sender name.
+   - Port **587** (most providers) starts plain and upgrades to TLS. Leave "Secure connection from the start" off.
+   - Port **465** needs "Secure connection from the start" on. The screen switches it for you when you type 465.
+3. **Save**, then **Send a test email**. It goes to your own address. If it fails, the screen says why in plain words (wrong password, address not found, connection refused, timed out).
+4. The password is stored encrypted and is never shown again. **Remove** deletes the settings.
+
+Until email is set up, nothing breaks: alerts are simply not sent, and invite links are shared by hand.
 
 **Callback URL: what it is.** It is the address Salesforce sends the customer back to after login, so this app can receive the login code. It must be **this app's own address** (above), not `login.salesforce.com`. `login.salesforce.com` is where the login page lives; it is chosen automatically by the Production/Sandbox choice. If the Callback URL in Salesforce is anything other than the exact address above, Salesforce shows `redirect_uri_mismatch`.
 
@@ -95,10 +108,10 @@ If **Test with Salesforce** shows "retry your request", the new Connected App is
   - **Time zone**: every date in the app uses it.
   - **Default schedule**: given to each org you connect later. **Apply to all connected orgs now** sets it on existing orgs.
   - **Retention**: delete finished backups older than N days (checked every hour). The screen shows how many backups would go before you save. The newest good backup of each org is always kept, and running backups are never touched. Empty means keep forever.
-  - **Alerts**: choices are saved, but **no email is sent yet** (see limits).
+  - **Alerts**: an email is sent when a backup **fails** or an org **needs to be reconnected**. Partial backups show on the Dashboard only. It goes to the **Alert email** if you set one, otherwise to every active owner. One email per failed backup, never more. The owner can press **Send a test alert**, and the last 5 alerts are listed with whether they were sent. If the mail server refuses a message, that is shown there too, and the backup itself still shows as failed.
   - **Sign-in length**, **change my password**, and a read-only **role permissions** table.
   - **Team**: invite people, change roles, switch people off. A switched-off person is signed out at once and cannot sign in.
-- **Inviting someone**: Settings → Team → enter email and role → **Create invite link**. No email is sent, so copy the link and send it yourself. It is shown once, works 7 days, and works once. The person opens it, picks a name and password, and joins your company.
+- **Inviting someone**: Settings → Team → enter email and role → **Invite**. If email is set up, the invitation is emailed. The link is also shown once, so you can copy it and send it yourself (for example if the email does not arrive). It works 7 days, and works once. The person opens it, picks a name and password, and joins your company.
 
 ### What the run status means
 
@@ -120,7 +133,8 @@ The one shared Connected App must be usable in each customer org. Salesforce may
 
 ## 7. Checks that were done
 
-- Backend: 54 automated tests pass (login, encryption, connect flow, backup, honest status, settings, team invites, retention, dashboard). They use a **fake Salesforce**.
+- Backend: 62 automated tests pass (login, encryption, connect flow, backup, honest status, settings, team invites, retention, dashboard, email settings, failure alerts, invitation email). They use a **fake Salesforce** and a **fake mail server**.
+- Email: the screens were opened in a browser and the error messages checked against a mail server that refuses connections. **No real email has been sent yet.** Please press **Send a test email** with your provider's details.
 - Frontend: type check and build pass. Screens were opened in a browser, including phone width.
 - Against real Salesforce: the app was tested only with a fake Client ID. Salesforce answered that it does not recognise it, and the app showed a clear message. **A full backup of a real org has not been run yet.** It needs your Connected App. Please run a first backup on your Developer org and read the run details.
 
@@ -131,5 +145,5 @@ The one shared Connected App must be usable in each customer org. Salesforce may
 - Some data is not copied, and each is listed with its reason: managed-package metadata, binary and compound fields, and some system objects. See **What a backup covers** on the org page.
 - Backups run inside the app server process. For many customers, move them to a separate worker later.
 - Storage is the server's disk. Object storage (S3 or similar) is a later step.
-- No email sending yet (password reset, failure alerts, invites). Invites are shared as a link. The alert settings are saved for when email is added.
+- Email covers failure alerts and invitations only. **Password reset by email is not built yet.** An alert is not retried if the mail server is down at that moment (the failure is shown in the alert list).
 - Roles: Owner can do everything, including settings and team. Admin can connect, back up, schedule and delete orgs. Viewer can only look and download.

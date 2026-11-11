@@ -240,9 +240,9 @@ export function explainSfAuthError(e: SalesforceAuthError): string {
   }
   switch (e.sfError) {
     case 'invalid_client_id':
-      return 'Salesforce does not recognise the Client ID. Check it in Admin > Salesforce integration. A brand-new Connected App can take up to 10 minutes to start working.';
+      return 'Salesforce does not recognise the Client ID. Check it in Platform setup. A brand-new Connected App can take up to 10 minutes to start working.';
     case 'invalid_client':
-      return 'Salesforce rejected the Client Secret. Re-enter it in Admin > Salesforce integration.';
+      return 'Salesforce rejected the Client Secret. Re-enter it in Platform setup.';
     case 'redirect_uri_mismatch':
       return `The Callback URL saved in your Salesforce Connected App is not the one this app uses. In Salesforce, open the Connected App and set its Callback URL to exactly: ${config.oauthCallbackUrl} (no spaces, no extra line). Save, wait a minute or two, then test again.`;
     case 'invalid_grant':

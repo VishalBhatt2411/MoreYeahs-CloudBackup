@@ -105,6 +105,33 @@ model SalesforceAppConfig {
   updatedById     String?
 }
 
+// One row only (id = "default"). Where the platform sends email from. Entered by the platform admin.
+model EmailConfig {
+  id          String   @id
+  host        String
+  port        Int
+  secure      Boolean  @default(false) // true = TLS from the start (usually port 465)
+  username    String?
+  passwordEnc String?
+  fromEmail   String
+  fromName    String   @default("MoreYeahs CloudBackup")
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+}
+
+// One row per backup we tried to email about (so we never send two emails for the same run).
+model AlertLog {
+  id        String   @id @default(cuid())
+  tenantId  String
+  runId     String   @unique
+  toEmail   String
+  status    String // SENT | FAILED | SKIPPED
+  detail    String?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
 // Short-lived record that links the "Connect Salesforce" click to the callback.
 model OAuthState {
   state            String   @id

@@ -48,7 +48,7 @@ async function main() {
       tenantId: tenant.id,
     },
   });
-  console.log(`Platform admin ${email} created. Sign in, then open "Salesforce integration" to save the Connected App details.`);
+  console.log(`Platform admin ${email} created. Sign in, then open "Platform setup" to save the Connected App details.`);
 }
 
 main()

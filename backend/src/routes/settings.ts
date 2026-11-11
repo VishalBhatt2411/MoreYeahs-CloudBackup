@@ -3,7 +3,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { prisma } from '../db.js';
+import { alertRecipients } from '../backup/alerts.js';
 import { previewRetention } from '../backup/retention.js';
+import { explainMailError, isEmailConfigured, renderEmail, sendMail } from '../lib/mail.js';
 import { audit } from '../lib/audit.js';
 import { HttpError, wrap } from '../lib/http.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
@@ -54,9 +56,41 @@ settingsRouter.get(
       settings: tenantView(tenant),
       // Real list of zones the server knows, so the screen never offers one that would be refused.
       timeZones: zoneList(),
-      // Email is not sent by this version, so the screen says so honestly.
-      emailConfigured: false,
+      // True once the platform admin has entered the mail server details.
+      emailConfigured: await isEmailConfigured(),
+      alertRecipients: await alertRecipients(tenant.id, tenant.alertEmail),
+      recentAlerts: await prisma.alertLog.findMany({
+        where: { tenantId: tenant.id },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: { id: true, runId: true, toEmail: true, status: true, detail: true, createdAt: true },
+      }),
     });
+  }),
+);
+
+// Sends a sample alert to whoever would get a real one, so the owner can check it arrives.
+settingsRouter.post(
+  '/test-alert',
+  requireRole('OWNER'),
+  wrap(async (req, res) => {
+    if (!(await isEmailConfigured())) {
+      throw new HttpError(409, 'Email is not set up on this server yet. Ask the platform administrator to set it up.');
+    }
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: req.user!.tenantId } });
+    const to = await alertRecipients(tenant.id, tenant.alertEmail);
+    if (to.length === 0) throw new HttpError(400, 'There is nobody to send to. Enter an alert email first.');
+    const mail = renderEmail({
+      heading: 'Test alert',
+      lines: [`This is a test alert for ${tenant.name}.`, 'When a backup fails, you will get an email like this one.'],
+      button: { label: 'Open CloudBackup', url: `${config.appUrl}/dashboard` },
+    });
+    try {
+      await sendMail({ to, subject: '[CloudBackup] Test alert', ...mail });
+      res.json({ ok: true, message: `Test alert sent to ${to.join(', ')}.` });
+    } catch (e) {
+      res.json({ ok: false, message: explainMailError(e) });
+    }
   }),
 );
 
@@ -162,10 +196,35 @@ teamRouter.post(
       },
     });
     await audit(tenantId, req.user!.id, 'team.invited', body.email, body.role);
-    // The link is shown once. No email is sent by this version, so the owner shares it.
+    const link = `${config.appUrl}/join/${token}`;
+    // Email the link when mail is set up. The link is still shown once, so it can be shared by hand.
+    let emailed = false;
+    let emailError: string | null = null;
+    if (await isEmailConfigured()) {
+      const [tenant, inviter] = await Promise.all([
+        prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } }),
+        prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } }),
+      ]);
+      const mail = renderEmail({
+        heading: `Join ${tenant.name} on CloudBackup`,
+        lines: [
+          `${inviter.name} invited you to ${tenant.name} as ${body.role.toLowerCase()}.`,
+          `Open the link, choose a password, and you are in. The link works once and expires in ${INVITE_DAYS} days.`,
+        ],
+        button: { label: 'Accept the invitation', url: link },
+      });
+      try {
+        await sendMail({ to: body.email, subject: `You are invited to ${tenant.name} on CloudBackup`, ...mail });
+        emailed = true;
+      } catch (e) {
+        emailError = explainMailError(e);
+      }
+    }
     res.status(201).json({
       invite: { id: invite.id, email: invite.email, role: invite.role, expiresAt: invite.expiresAt },
-      link: `${config.appUrl}/join/${token}`,
+      link,
+      emailed,
+      emailError,
     });
   }),
 );

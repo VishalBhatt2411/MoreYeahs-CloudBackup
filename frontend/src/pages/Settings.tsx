@@ -42,11 +42,21 @@ const SESSIONS = [
   { v: '720', t: '30 days' },
 ];
 
+interface SettingsResponse {
+  settings: Settings;
+  timeZones: string[];
+  emailConfigured: boolean;
+  alertRecipients: string[];
+  recentAlerts: { id: string; runId: string; toEmail: string; status: 'SENT' | 'FAILED' | 'PENDING'; detail: string | null; createdAt: string }[];
+}
+
 export default function SettingsPage() {
   const { user, setTenant } = useAuth();
   const toast = useToast();
   const isOwner = user?.role === 'OWNER';
-  const loaded = useLoad(() => api<{ settings: Settings; timeZones: string[]; emailConfigured: boolean }>('/settings'), []);
+  const loaded = useLoad(() => api<SettingsResponse>('/settings'), []);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [form, setForm] = useState<Form | null>(null);
   const [saved, setSaved] = useState<Form | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -139,8 +149,22 @@ export default function SettingsPage() {
     }
   }
 
+  async function sendTestAlert() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      setTestResult(await api<{ ok: boolean; message: string }>('/settings/test-alert', { method: 'POST', body: {} }));
+    } catch (err) {
+      setTestResult({ ok: false, message: errText(err) });
+    } finally {
+      setTesting(false);
+    }
+  }
+
   const ro = !isOwner;
-  const { timeZones, emailConfigured } = loaded.data;
+  const { timeZones, emailConfigured, recentAlerts } = loaded.data;
+  // Who would get an alert right now, based on what is on screen (the saved value may differ until saved).
+  const sendTo = form.alertEmail.trim() || loaded.data.alertRecipients.join(', ') || 'the company owners';
   const zones = timeZones.includes(form.timeZone) ? timeZones : [form.timeZone, ...timeZones];
   const scheduleOptions = SCHEDULES.some((s) => s.v === form.defaultScheduleHours) ? SCHEDULES : [...SCHEDULES, { v: form.defaultScheduleHours, t: `Every ${form.defaultScheduleHours} hours` }];
   const sessionOptions = SESSIONS.some((s) => s.v === form.sessionHours) ? SESSIONS : [...SESSIONS, { v: form.sessionHours, t: `${form.sessionHours} hours` }];
@@ -214,18 +238,44 @@ export default function SettingsPage() {
         </section>
 
         <section className="panel">
-          <div className="panel-head"><div><h2>Alerts</h2></div></div>
+          <div className="panel-head"><div><h2>Alerts</h2><p>An email is sent when a backup fails or an org needs to be reconnected. Partial backups show on the Dashboard only.</p></div></div>
           {!emailConfigured && (
-            <Notice kind="warn">Email sending is not set up in this version yet, so alerts are not emailed. Your choices are saved for when it is. Failed backups always show on the Dashboard.</Notice>
+            <Notice kind="warn">Email is not set up on this server yet, so alerts cannot be sent. Ask the platform administrator to enter the mail server details. Failed backups always show on the Dashboard.</Notice>
           )}
           <label className="check">
             <input type="checkbox" checked={form.alertOnFailure} onChange={(e) => set('alertOnFailure', e.target.checked)} disabled={ro} />
-            Alert me when a backup fails
+            Email me when a backup fails
           </label>
           <div className="field">
             <label htmlFor="ae">Alert email</label>
             <input id="ae" type="email" placeholder="you@company.com" value={form.alertEmail} onChange={(e) => set('alertEmail', e.target.value)} disabled={ro} />
+            <small>Leave empty to email every active owner ({loaded.data.alertRecipients.join(', ') || 'none'}).</small>
           </div>
+          {isOwner && emailConfigured && (
+            <div className="row gap" style={{ marginTop: 0 }}>
+              <button type="button" className="btn secondary small" disabled={dirty || testing} onClick={() => void sendTestAlert()}>
+                {testing ? 'Sending…' : 'Send a test alert'}
+              </button>
+              <small className="hint-line">{dirty ? 'Save first, then test.' : `Sends to ${sendTo}.`}</small>
+            </div>
+          )}
+          {testResult && <div style={{ marginTop: 12 }}><Notice kind={testResult.ok ? 'ok' : 'error'}>{testResult.message}</Notice></div>}
+          {recentAlerts.length > 0 && (
+            <div className="table-wrap" style={{ marginTop: 16 }}>
+              <table>
+                <thead><tr><th>RECENT ALERTS</th><th>SENT TO</th><th>RESULT</th></tr></thead>
+                <tbody>
+                  {recentAlerts.map((a) => (
+                    <tr key={a.id}>
+                      <td>{formatDate(a.createdAt)}</td>
+                      <td>{a.toEmail}</td>
+                      <td>{a.status === 'SENT' ? <span className="pill ok">Sent</span> : a.status === 'FAILED' ? <><span className="pill bad">Not sent</span> <small className="hint">{a.detail}</small></> : <span className="pill grey">Sending</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
 
         <section className="panel">
@@ -303,7 +353,7 @@ function TeamPanel({ isOwner, meId }: { isOwner: boolean; meId: string }) {
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<Role>('VIEWER');
   const [error, setError] = useState<string | null>(null);
-  const [link, setLink] = useState<{ email: string; url: string } | null>(null);
+  const [link, setLink] = useState<{ email: string; url: string; emailed: boolean; emailError: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function invite(e: FormEvent) {
@@ -311,8 +361,8 @@ function TeamPanel({ isOwner, meId }: { isOwner: boolean; meId: string }) {
     setError(null);
     setBusy(true);
     try {
-      const r = await api<{ invite: { email: string }; link: string }>('/team/invites', { method: 'POST', body: { email, role } });
-      setLink({ email: r.invite.email, url: r.link });
+      const r = await api<{ invite: { email: string }; link: string; emailed: boolean; emailError: string | null }>('/team/invites', { method: 'POST', body: { email, role } });
+      setLink({ email: r.invite.email, url: r.link, emailed: r.emailed, emailError: r.emailError });
       setEmail('');
       team.reload();
     } catch (err) {
@@ -370,12 +420,18 @@ function TeamPanel({ isOwner, meId }: { isOwner: boolean; meId: string }) {
               <option value="OWNER">Owner</option>
             </select>
           </div>
-          <button className="btn primary" disabled={busy}>Create invite link</button>
+          <button className="btn primary" disabled={busy}>{busy ? 'Sending…' : 'Invite'}</button>
         </form>
       )}
       {link && (
         <Notice kind="ok">
-          Invite for <b>{link.email}</b> is ready. Email is not sent by this version, so share this link yourself. It works for 7 days and is shown only now.
+          {link.emailed ? (
+            <>An invitation email was sent to <b>{link.email}</b>. You can also share this link yourself. It works once, for 7 days, and is shown only now.</>
+          ) : link.emailError ? (
+            <>Invite for <b>{link.email}</b> is ready, but the email could not be sent: {link.emailError} Share this link yourself. It works once, for 7 days, and is shown only now.</>
+          ) : (
+            <>Invite for <b>{link.email}</b> is ready. Email is not set up on this server, so share this link yourself. It works once, for 7 days, and is shown only now.</>
+          )}
           <div className="linkbox">
             <code>{link.url}</code>
             <button type="button" className="btn secondary small" onClick={() => void copy(link.url)}>Copy</button>

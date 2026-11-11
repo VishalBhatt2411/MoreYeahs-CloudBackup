@@ -66,7 +66,7 @@ export default function Orgs() {
         <Notice kind="warn">
           Salesforce connecting is not set up yet.{' '}
           {user?.isPlatformAdmin ? (
-            <>Go to <Link to="/platform">Salesforce integration</Link> and enter the Connected App details once.</>
+            <>Go to <Link to="/platform">Platform setup</Link> and enter the Connected App details once.</>
           ) : (
             <>Please ask your platform administrator to finish the Salesforce setup.</>
           )}

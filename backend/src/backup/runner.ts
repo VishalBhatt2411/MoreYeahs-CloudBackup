@@ -5,6 +5,7 @@ import { prisma } from '../db.js';
 import { audit } from '../lib/audit.js';
 import { HttpError } from '../lib/http.js';
 import { getGateway, type SfGateway } from '../salesforce/gateway.js';
+import { sendRunAlert } from './alerts.js';
 import { classifyObjects, type ExcludedObject } from './coverage.js';
 import { exportMetadataType, exportObject, type ItemResult } from './exporters.js';
 import { purgeAllTenants } from './retention.js';
@@ -73,6 +74,8 @@ export async function waitForRun(runId: string, timeoutMs = 60_000) {
 
 async function finishRun(runId: string, status: RunStatus, message: string) {
   await prisma.backupRun.update({ where: { id: runId }, data: { status, message, finishedAt: new Date() } });
+  // Failed runs email the company (if mail is set up). Runs in the background and never throws.
+  if (status === 'FAILED') void sendRunAlert(runId);
 }
 
 async function executeRun(runId: string, connection: OrgConnection) {

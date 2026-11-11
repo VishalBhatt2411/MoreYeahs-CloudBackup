@@ -25,6 +25,7 @@
     "helmet": "^8.1.0",
     "jsforce": "^3.10.0",
     "jsonwebtoken": "^9.0.2",
+    "nodemailer": "^10.5.0",
     "zod": "^3.25.0"
   },
   "devDependencies": {
@@ -33,6 +34,7 @@
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.9",
     "@types/node": "^22.10.0",
+    "@types/nodemailer": "^8.0.2",
     "@types/supertest": "^6.0.3",
     "prisma": "^6.19.3",
     "supertest": "^7.1.0",

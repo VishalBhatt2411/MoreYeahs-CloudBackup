@@ -19,6 +19,8 @@ export async function resetDbEmpty() {
   await prisma.user.deleteMany();
   await prisma.tenant.deleteMany();
   await prisma.salesforceAppConfig.deleteMany();
+  await prisma.emailConfig.deleteMany();
+  await prisma.alertLog.deleteMany();
 }
 
 /**
