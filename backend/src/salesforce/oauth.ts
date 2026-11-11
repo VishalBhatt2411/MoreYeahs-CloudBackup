@@ -64,6 +64,29 @@ export function buildAuthorizeUrl(args: {
   return url.toString();
 }
 
+/**
+ * Asks Salesforce's login page (no login, nothing secret) whether it accepts this Client ID
+ * and callback address. Salesforce answers a bad one with HTTP 400 and a body like
+ * "error=redirect_uri_mismatch&error_description=...". Anything else means "no problem found".
+ */
+export async function probeAuthorize(args: {
+  environment: Environment;
+  clientId: string;
+}): Promise<SalesforceAuthError | null> {
+  const { challenge } = makePkce();
+  const url = buildAuthorizeUrl({ environment: args.environment, clientId: args.clientId, state: 'connection-test', challenge });
+  try {
+    const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(20_000) });
+    if (res.status !== 400) return null;
+    const body = (await res.text()).trim().slice(0, 500);
+    if (!body.startsWith('error=')) return null;
+    const p = new URLSearchParams(body);
+    return new SalesforceAuthError(p.get('error') ?? 'unknown_error', p.get('error_description') ?? '');
+  } catch {
+    return null; // cannot reach it: the next check reports that
+  }
+}
+
 export interface TokenResponse {
   access_token: string;
   refresh_token?: string;
@@ -172,13 +195,21 @@ export async function fetchIdentity(idUrl: string, accessToken: string): Promise
 
 /** Turns Salesforce error codes into plain-English guidance. */
 export function explainSfAuthError(e: SalesforceAuthError): string {
+  // Salesforce's own catch-all. In practice it means the Connected App is not fully active yet.
+  if (e.sfError === 'unknown_error' || /retry your request/i.test(e.sfDescription)) {
+    return (
+      'Salesforce could not process the request ("retry your request"). This usually means the Connected App ' +
+      'is still being activated. Wait about 10 minutes after saving it and test again. ' +
+      'If it keeps happening, re-copy the Consumer Key and Consumer Secret from "Manage Consumer Details" and save them here again.'
+    );
+  }
   switch (e.sfError) {
     case 'invalid_client_id':
       return 'Salesforce does not recognise the Client ID. Check it in Admin > Salesforce integration. A brand-new Connected App can take up to 10 minutes to start working.';
     case 'invalid_client':
       return 'Salesforce rejected the Client Secret. Re-enter it in Admin > Salesforce integration.';
     case 'redirect_uri_mismatch':
-      return 'The callback address in the Salesforce Connected App does not match this app. Copy the exact callback address shown in Admin > Salesforce integration.';
+      return `The Callback URL saved in your Salesforce Connected App is not the one this app uses. In Salesforce, open the Connected App and set its Callback URL to exactly: ${config.oauthCallbackUrl} (no spaces, no extra line). Save, wait a minute or two, then test again.`;
     case 'invalid_grant':
       return 'The Salesforce login expired or was already used. Please click Connect again.';
     case 'invalid_app_access':

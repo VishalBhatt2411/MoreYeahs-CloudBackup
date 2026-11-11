@@ -1,6 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
+import { config } from '../src/config.js';
 import { prisma } from '../src/db.js';
 import { encrypt } from '../src/lib/crypto.js';
 
@@ -78,10 +79,26 @@ export async function makeConnection(tenantId: string, overrides: Record<string,
   });
 }
 
+/** The callback address the fake "Connected App" has saved. Tests change it to simulate a mismatch. */
+export const fakeSf = { savedCallbackUrl: config.oauthCallbackUrl as string };
+
 /** A tiny pretend Salesforce login server. */
 export function startFakeSalesforce(port = 54399): Promise<Server> {
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', `http://localhost:${port}`);
+    if (req.method === 'GET' && url.pathname === '/services/oauth2/authorize') {
+      // Like the real one: a bad request is HTTP 400 with an "error=..." body.
+      const bad = (error: string, desc: string) => {
+        res.writeHead(400, { 'content-type': 'text/plain' });
+        res.end(`error=${error}&error_description=${encodeURIComponent(desc)}`);
+      };
+      if (url.searchParams.get('client_id') !== CLIENT_ID) return bad('invalid_client_id', 'client identifier invalid');
+      if (url.searchParams.get('redirect_uri') !== fakeSf.savedCallbackUrl) {
+        return bad('redirect_uri_mismatch', 'redirect_uri must match configuration');
+      }
+      res.writeHead(302, { location: `${url.origin}/login` });
+      return res.end();
+    }
     const send = (status: number, body: unknown) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));

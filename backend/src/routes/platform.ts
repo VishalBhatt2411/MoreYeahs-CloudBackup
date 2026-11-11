@@ -6,7 +6,14 @@ import { audit } from '../lib/audit.js';
 import { encrypt } from '../lib/crypto.js';
 import { HttpError, wrap } from '../lib/http.js';
 import { requireAuth, requirePlatformAdmin } from '../middleware/auth.js';
-import { SalesforceAuthError, exchangeCode, explainSfAuthError, getAppCredentials, makePkce } from '../salesforce/oauth.js';
+import {
+  SalesforceAuthError,
+  exchangeCode,
+  explainSfAuthError,
+  getAppCredentials,
+  makePkce,
+  probeAuthorize,
+} from '../salesforce/oauth.js';
 
 /** Anyone signed in can ask "is Salesforce connecting set up?" (never returns secrets). */
 export const salesforceStatusRouter = Router();
@@ -72,6 +79,13 @@ platformRouter.post(
   wrap(async (_req, res) => {
     const creds = await getAppCredentials();
     if (!creds) throw new HttpError(409, 'Save the Client ID and Secret first.');
+    // Check 1: does Salesforce accept this Client ID and our callback address?
+    const probe = await probeAuthorize({ environment: 'PRODUCTION', clientId: creds.clientId });
+    if (probe) {
+      res.json({ ok: false, message: explainSfAuthError(probe), code: probe.sfError });
+      return;
+    }
+    // Check 2: does it accept the Client Secret?
     const { verifier } = makePkce();
     try {
       await exchangeCode({ environment: 'PRODUCTION', code: 'cloudbackup-connection-test', verifier, creds });

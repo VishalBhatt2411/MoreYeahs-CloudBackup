@@ -1,8 +1,10 @@
 import type { Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
-import { app, CLIENT_ID, CLIENT_SECRET, makePlatformAdmin, resetDb, saveAppCredentials, signUp, startFakeSalesforce } from './helpers.js';
+import { app, CLIENT_ID, CLIENT_SECRET, fakeSf, makePlatformAdmin, resetDb, saveAppCredentials, signUp, startFakeSalesforce } from './helpers.js';
+import { config } from '../src/config.js';
 import { prisma } from '../src/db.js';
+import { SalesforceAuthError, explainSfAuthError } from '../src/salesforce/oauth.js';
 import { decrypt, encrypt } from '../src/lib/crypto.js';
 
 let sf: Server;
@@ -48,6 +50,26 @@ describe('platform admin: saving the Salesforce app details', () => {
     expect(bad.body.message).toMatch(/Client ID/);
     await agent.put('/api/platform/salesforce').send({ clientId: CLIENT_ID });
     expect((await agent.post('/api/platform/salesforce/test')).body.ok).toBe(true);
+  });
+
+  it('the test names the exact callback address when Salesforce has a different one saved', async () => {
+    const { agent } = await makePlatformAdmin();
+    await agent.put('/api/platform/salesforce').send({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET });
+    fakeSf.savedCallbackUrl = 'https://login.salesforce.com/services/oauth2/success';
+    try {
+      const r = await agent.post('/api/platform/salesforce/test');
+      expect(r.body.ok).toBe(false);
+      expect(r.body.code).toBe('redirect_uri_mismatch');
+      expect(r.body.message).toContain('http://localhost:5173/api/oauth/salesforce/callback');
+    } finally {
+      fakeSf.savedCallbackUrl = config.oauthCallbackUrl;
+    }
+    expect((await agent.post('/api/platform/salesforce/test')).body.ok).toBe(true);
+  });
+
+  it('explains the vague "retry your request" reply from Salesforce', () => {
+    const msg = explainSfAuthError(new SalesforceAuthError('unknown_error', 'retry your request'));
+    expect(msg).toMatch(/10 minutes/);
   });
 
   it('customers can see whether connecting is set up, but nothing more', async () => {

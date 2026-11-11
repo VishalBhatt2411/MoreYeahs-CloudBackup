@@ -72,7 +72,9 @@ In your Developer Edition org:
 
 Then in CloudBackup: **Salesforce integration** → paste both → **Save** → **Test with Salesforce**.
 
-> Note: while building, fake test values were saved in the local dev database. Replace them with your real ones on this screen.
+**Callback URL: what it is.** It is the address Salesforce sends the customer back to after login, so this app can receive the login code. It must be **this app's own address** (above), not `login.salesforce.com`. `login.salesforce.com` is where the login page lives; it is chosen automatically by the Production/Sandbox choice. If the Callback URL in Salesforce is anything other than the exact address above, Salesforce shows `redirect_uri_mismatch`.
+
+If **Test with Salesforce** shows "retry your request", the new Connected App is usually still activating. Wait about 10 minutes and test again.
 
 ## 4. Take a backup
 
