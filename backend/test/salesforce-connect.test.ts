@@ -1,7 +1,19 @@
 import type { Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
-import { app, CLIENT_ID, CLIENT_SECRET, fakeSf, makePlatformAdmin, resetDb, saveAppCredentials, signUp, startFakeSalesforce } from './helpers.js';
+import {
+  app,
+  CLIENT_ID,
+  CLIENT_SECRET,
+  fakeSf,
+  makeConnection,
+  makePlatformAdmin,
+  resetDb,
+  saveAppCredentials,
+  signUp,
+  startFakeSalesforce,
+} from './helpers.js';
+import { realGatewayFactory } from '../src/salesforce/gateway.js';
 import { config } from '../src/config.js';
 import { prisma } from '../src/db.js';
 import { SalesforceAuthError, explainSfAuthError } from '../src/salesforce/oauth.js';
@@ -178,5 +190,28 @@ describe('customer connects a Salesforce org (login flow)', () => {
     expect(row.refreshTokenEnc).toBe('');
     const log = await prisma.auditLog.findMany({ where: { tenantId: user.tenant.id } });
     expect(log.map((a) => a.action)).toEqual(expect.arrayContaining(['org.connected', 'org.disconnect']));
+  });
+
+  it('keeps working when Salesforce rotates the refresh token on every renewal', async () => {
+    await saveAppCredentials();
+    const { agent, user } = await signUp('Rotation');
+    fakeSf.rotate = true;
+    fakeSf.currentRefresh = 'rotating-0';
+    fakeSf.rotations = 0;
+    try {
+      const c = await makeConnection(user.tenant.id, { refreshTokenEnc: encrypt('rotating-0') });
+      // Before the fix the second renewal failed: the old token had been cancelled.
+      for (let i = 0; i < 3; i++) {
+        expect((await agent.post(`/api/connections/${c.id}/check`)).body.ok).toBe(true);
+      }
+      // The backup's own login renewal uses the newest token too.
+      await realGatewayFactory(await prisma.orgConnection.findUniqueOrThrow({ where: { id: c.id } }));
+      await realGatewayFactory(await prisma.orgConnection.findUniqueOrThrow({ where: { id: c.id } }));
+      const row = await prisma.orgConnection.findUniqueOrThrow({ where: { id: c.id } });
+      expect(decrypt(row.refreshTokenEnc)).toBe(fakeSf.currentRefresh);
+      expect(fakeSf.rotations).toBe(5);
+    } finally {
+      fakeSf.rotate = false;
+    }
   });
 });

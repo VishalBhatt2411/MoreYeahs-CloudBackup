@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { Environment } from '@prisma/client';
 import { config } from '../config.js';
 import { prisma } from '../db.js';
-import { decrypt } from '../lib/crypto.js';
+import { decrypt, encrypt } from '../lib/crypto.js';
 import { HttpError } from '../lib/http.js';
 
 /**
@@ -144,7 +144,7 @@ export async function refreshAccessToken(args: {
   loginUrl: string;
   refreshToken: string;
   creds: AppCredentials;
-}): Promise<{ accessToken: string; instanceUrl: string }> {
+}): Promise<{ accessToken: string; instanceUrl: string; refreshToken?: string }> {
   const r = await postForm(`${args.loginUrl}/services/oauth2/token`, {
     grant_type: 'refresh_token',
     refresh_token: args.refreshToken,
@@ -154,7 +154,42 @@ export async function refreshAccessToken(args: {
   if (!r.ok) {
     throw new SalesforceAuthError(String(r.json.error ?? r.status), String(r.json.error_description ?? 'Token refresh failed'));
   }
-  return { accessToken: String(r.json.access_token), instanceUrl: String(r.json.instance_url) };
+  return {
+    accessToken: String(r.json.access_token),
+    instanceUrl: String(r.json.instance_url),
+    // Present when the Connected App uses refresh token rotation: the old one is now dead.
+    refreshToken: typeof r.json.refresh_token === 'string' ? r.json.refresh_token : undefined,
+  };
+}
+
+const refreshing = new Map<string, Promise<{ accessToken: string; instanceUrl: string }>>();
+
+/**
+ * Gets a fresh access token for a saved org login, and keeps the newest refresh token.
+ * Needed because with "refresh token rotation" Salesforce cancels the old refresh token
+ * each time. Calls for the same org are merged so two never race each other.
+ */
+export function refreshOrgLogin(
+  connection: { id: string; loginUrl: string; refreshTokenEnc: string },
+  creds: AppCredentials,
+): Promise<{ accessToken: string; instanceUrl: string }> {
+  const running = refreshing.get(connection.id);
+  if (running) return running;
+  const job = (async () => {
+    // Read the newest saved token, since the object we were handed may be out of date.
+    const latest = await prisma.orgConnection.findUnique({ where: { id: connection.id }, select: { refreshTokenEnc: true } });
+    const t = await refreshAccessToken({
+      loginUrl: connection.loginUrl,
+      refreshToken: decrypt(latest?.refreshTokenEnc || connection.refreshTokenEnc),
+      creds,
+    });
+    if (t.refreshToken) {
+      await prisma.orgConnection.update({ where: { id: connection.id }, data: { refreshTokenEnc: encrypt(t.refreshToken) } });
+    }
+    return { accessToken: t.accessToken, instanceUrl: t.instanceUrl };
+  })().finally(() => refreshing.delete(connection.id));
+  refreshing.set(connection.id, job);
+  return job;
 }
 
 export async function revokeToken(args: { loginUrl: string; token: string }): Promise<void> {

@@ -80,7 +80,13 @@ export async function makeConnection(tenantId: string, overrides: Record<string,
 }
 
 /** The callback address the fake "Connected App" has saved. Tests change it to simulate a mismatch. */
-export const fakeSf = { savedCallbackUrl: config.oauthCallbackUrl as string };
+export const fakeSf = {
+  savedCallbackUrl: config.oauthCallbackUrl as string,
+  /** Simulates refresh token rotation: only the newest refresh token is accepted. */
+  rotate: false,
+  currentRefresh: 'rotating-0',
+  rotations: 0,
+};
 
 /** A tiny pretend Salesforce login server. */
 export function startFakeSalesforce(port = 54399): Promise<Server> {
@@ -112,6 +118,14 @@ export function startFakeSalesforce(port = 54399): Promise<Server> {
         if (p.get('client_secret') !== CLIENT_SECRET) return send(400, { error: 'invalid_client', error_description: 'invalid client credentials' });
         if (p.get('grant_type') === 'refresh_token') {
           if (p.get('refresh_token') === 'revoked-token') return send(400, { error: 'invalid_grant', error_description: 'expired access/refresh token' });
+          if (fakeSf.rotate) {
+            // Like a Connected App with "refresh token rotation": each refresh token works once.
+            if (p.get('refresh_token') !== fakeSf.currentRefresh) {
+              return send(400, { error: 'invalid_grant', error_description: 'expired access/refresh token' });
+            }
+            fakeSf.currentRefresh = `rotated-${++fakeSf.rotations}`;
+            return send(200, { access_token: 'fake-access', refresh_token: fakeSf.currentRefresh, instance_url: `http://localhost:${port}` });
+          }
           return send(200, { access_token: 'fake-access', instance_url: `http://localhost:${port}` });
         }
         if (p.get('code') === 'good-code') {

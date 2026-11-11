@@ -1,8 +1,7 @@
 import { Connection } from 'jsforce';
 import type { OrgConnection } from '@prisma/client';
 import { config } from '../config.js';
-import { decrypt } from '../lib/crypto.js';
-import { requireAppCredentials } from './oauth.js';
+import { refreshOrgLogin, requireAppCredentials } from './oauth.js';
 import { latestApiVersion } from './rest.js';
 
 export interface ObjectInfo {
@@ -141,19 +140,25 @@ export const realGatewayFactory: GatewayFactory = async (connection) => {
   const creds = await requireAppCredentials();
   const conn = new Connection({
     instanceUrl: connection.instanceUrl,
-    refreshToken: decrypt(connection.refreshTokenEnc),
     oauth2: {
       clientId: creds.clientId,
       clientSecret: creds.clientSecret,
       loginUrl: connection.loginUrl,
       redirectUri: config.oauthCallbackUrl,
     },
+    // If the access token runs out during a long backup, renew it our way (keeps the rotated refresh token).
+    refreshFn: (_c, callback) => {
+      refreshOrgLogin(connection, creds).then(
+        (f) => callback(null, f.accessToken),
+        (e) => callback(e as Error),
+      );
+    },
   });
   // No access token yet: ask Salesforce for one using the stored refresh token.
-  await conn.oauth2.refreshToken(decrypt(connection.refreshTokenEnc)).then((r) => {
-    conn.accessToken = r.access_token;
-    if (r.instance_url) conn.instanceUrl = r.instance_url;
-  });
+  // (Saves the newest refresh token too, because Salesforce may rotate it every time.)
+  const fresh = await refreshOrgLogin(connection, creds);
+  conn.accessToken = fresh.accessToken;
+  if (fresh.instanceUrl) conn.instanceUrl = fresh.instanceUrl;
   const apiVersion = await latestApiVersion(conn.instanceUrl);
   conn.version = apiVersion;
   return new JsforceGateway(conn, apiVersion);

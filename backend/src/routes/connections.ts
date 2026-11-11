@@ -9,7 +9,7 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { classifyObjects } from '../backup/coverage.js';
 import { startRun } from '../backup/runner.js';
 import { getGateway } from '../salesforce/gateway.js';
-import { SalesforceAuthError, fetchIdentity, refreshAccessToken, requireAppCredentials, revokeToken } from '../salesforce/oauth.js';
+import { SalesforceAuthError, fetchIdentity, refreshOrgLogin, requireAppCredentials, revokeToken } from '../salesforce/oauth.js';
 
 export const connectionsRouter = Router();
 connectionsRouter.use(requireAuth);
@@ -93,7 +93,7 @@ connectionsRouter.post(
     if (c.status === 'DISCONNECTED') throw new HttpError(409, 'This org is disconnected. Connect it again first.');
     const creds = await requireAppCredentials();
     try {
-      const t = await refreshAccessToken({ loginUrl: c.loginUrl, refreshToken: decrypt(c.refreshTokenEnc), creds });
+      const t = await refreshOrgLogin(c, creds);
       const updated = await prisma.orgConnection.update({
         where: { id: c.id },
         data: { status: 'ACTIVE', lastError: null, lastCheckedAt: new Date(), instanceUrl: t.instanceUrl },
