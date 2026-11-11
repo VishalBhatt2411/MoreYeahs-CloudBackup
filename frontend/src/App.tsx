@@ -6,6 +6,8 @@ import DashboardPage from './pages/Dashboard';
 import ForgotPassword from './pages/ForgotPassword';
 import Join from './pages/Join';
 import ResetPassword from './pages/ResetPassword';
+import VerifyEmail from './pages/VerifyEmail';
+import ExplorerPage from './pages/Explorer';
 import OrgDetail from './pages/OrgDetail';
 import Orgs from './pages/Orgs';
 import PlatformPage from './pages/Platform';
@@ -31,6 +33,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           <NavLink to="/dashboard">Dashboard</NavLink>
           <NavLink to="/orgs">Organizations</NavLink>
           <NavLink to="/runs">Backup runs</NavLink>
+          <NavLink to="/explorer">Data explorer</NavLink>
           <NavLink to="/audit">Activity log</NavLink>
           <div className="nav-label">ACCOUNT</div>
           <NavLink to="/settings">Settings</NavLink>
@@ -69,6 +72,13 @@ export default function App() {
       </Routes>
     );
   }
+  if (location.pathname.startsWith('/verify/')) {
+    return (
+      <Routes>
+        <Route path="/verify/:token" element={<VerifyEmail />} />
+      </Routes>
+    );
+  }
   if (!user) {
     return (
       <Routes>
@@ -94,6 +104,7 @@ export default function App() {
         <Route path="/orgs/:id" element={<OrgDetail />} />
         <Route path="/runs" element={<RunsPage />} />
         <Route path="/runs/:id" element={<RunDetail />} />
+        <Route path="/explorer" element={<ExplorerPage />} />
         <Route path="/audit" element={<AuditPage />} />
         <Route path="/platform" element={user.isPlatformAdmin ? <PlatformPage /> : <Navigate to="/orgs" replace />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />

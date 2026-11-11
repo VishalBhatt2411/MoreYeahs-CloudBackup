@@ -11,6 +11,12 @@ enum Role {
   OWNER
   ADMIN
   VIEWER
+  AUDITOR
+}
+
+enum RunMode {
+  FULL
+  INCREMENTAL
 }
 
 enum Environment {
@@ -63,6 +69,13 @@ model Tenant {
   alertOnFailure       Boolean @default(true)
   alertEmail           String?
   sessionHours         Int     @default(168) // how long a sign-in lasts
+
+  // Legal hold: while on, nothing of this customer is deleted (retention, "delete my backups", account deletion).
+  legalHold       Boolean   @default(false)
+  legalHoldReason String?
+  legalHoldAt     DateTime?
+
+  checkpoints ObjectCheckpoint[]
 }
 
 model Invite {
@@ -94,13 +107,29 @@ model User {
   lastLoginAt     DateTime?
   // Logins issued before this moment are refused (set when the password is reset).
   passwordChangedAt DateTime?
+  // null = the person has not proven they own the email address yet.
+  emailVerifiedAt DateTime?
   resets          PasswordReset[]
+  verifications   EmailVerification[]
 
   @@index([tenantId])
 }
 
 // A "forgot password" link. Only the hash of the token is stored. One use, short life.
 model PasswordReset {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  @@index([userId])
+}
+
+// An "verify your email" link. Only the hash of the token is stored. One use, 24 hours.
+model EmailVerification {
   id        String    @id @default(cuid())
   userId    String
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -182,6 +211,7 @@ model OrgConnection {
   scheduleHours   Int?
   nextRunAt       DateTime?
   runs            BackupRun[]
+  checkpoints     ObjectCheckpoint[]
 
   @@unique([tenantId, sfOrgId])
   @@index([tenantId])
@@ -203,6 +233,15 @@ model BackupRun {
   message      String?
   items        BackupItem[]
 
+  // Queue and worker
+  mode          RunMode   @default(FULL)
+  attempts      Int       @default(0)
+  maxAttempts   Int       @default(3)
+  leaseUntil    DateTime? // a running backup renews this every few seconds; if it lapses the worker is gone
+  workerId      String?
+  nextAttemptAt DateTime? // do not start before this moment (retry back-off)
+
+  @@index([status, createdAt])
   @@index([tenantId, createdAt])
   @@index([connectionId])
 }
@@ -224,8 +263,31 @@ model BackupItem {
   error         String?
   createdAt     DateTime   @default(now())
   finishedAt    DateTime?
+  files         Json? // metadata items: the list of files written (so a resumed run can rebuild the manifest)
+  mode          RunMode?
+  changedCount  Int? // incremental: rows added or changed since the last copy
+  deletedCount  Int? // incremental: rows that were deleted in Salesforce since the last copy
 
   @@index([runId])
+  @@index([tenantId])
+}
+
+// Where the last good copy of an object stands, so the next backup can copy only what changed.
+model ObjectCheckpoint {
+  id           String        @id @default(cuid())
+  tenantId     String
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  connectionId String
+  connection   OrgConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  objectName   String
+  watermark    DateTime // rows changed after this moment are copied next time
+  lastFilePath String
+  lastItemId   String?
+  lastFullAt   DateTime
+  needsFull    Boolean       @default(false)
+  updatedAt    DateTime      @updatedAt
+
+  @@unique([connectionId, objectName])
   @@index([tenantId])
 }
 

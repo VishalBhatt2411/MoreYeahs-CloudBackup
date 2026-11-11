@@ -1,7 +1,6 @@
-import { rm } from 'node:fs/promises';
 import { prisma } from '../db.js';
 import { audit } from '../lib/audit.js';
-import { runRelDir, safeAbsPath } from './storage.js';
+import { getStorage, guardTenantPath, runRelDir } from './storage.js';
 
 const DAY = 24 * 3600 * 1000;
 
@@ -36,21 +35,26 @@ export async function findExpiredRuns(tenantId: string, days: number) {
 }
 
 export async function previewRetention(tenantId: string, days: number) {
+  // A legal hold freezes deletion: nothing would be removed while it is on.
+  const hold = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { legalHold: true } });
+  if (hold?.legalHold) return { runs: 0, bytes: 0, legalHold: true };
   const runs = await findExpiredRuns(tenantId, days);
   const sum = runs.length
     ? await prisma.backupItem.aggregate({ where: { tenantId, runId: { in: runs.map((r) => r.id) } }, _sum: { bytes: true } })
     : null;
-  return { runs: runs.length, bytes: sum?._sum.bytes ?? 0 };
+  return { runs: runs.length, bytes: sum?._sum.bytes ?? 0, legalHold: false };
 }
 
 /** Deletes the expired backups' files and records. Returns how many backups were removed. */
 export async function purgeTenant(tenantId: string, days: number): Promise<number> {
+  // Re-checked here (not only in the caller) so no code path can delete under a legal hold.
+  const hold = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { legalHold: true } });
+  if (!hold || hold.legalHold) return 0;
   const runs = await findExpiredRuns(tenantId, days);
   let removed = 0;
   for (const run of runs) {
     try {
-      const dir = safeAbsPath(tenantId, runRelDir(tenantId, run.connectionId, run.id));
-      await rm(dir, { recursive: true, force: true });
+      await getStorage().removeTree(guardTenantPath(tenantId, runRelDir(tenantId, run.connectionId, run.id)));
       await prisma.backupRun.delete({ where: { id: run.id } });
       removed++;
     } catch (e) {

@@ -32,7 +32,7 @@ export interface User {
   id: string;
   email: string;
   name: string;
-  role: 'OWNER' | 'ADMIN' | 'VIEWER';
+  role: 'OWNER' | 'ADMIN' | 'VIEWER' | 'AUDITOR';
   isPlatformAdmin: boolean;
   tenant: { id: string; name: string; timeZone: string };
 }
@@ -63,6 +63,9 @@ export interface Run {
   startedAt: string | null;
   finishedAt: string | null;
   message: string | null;
+  /** FULL = everything was read again; INCREMENTAL = only what changed was read (the rest is carried over). */
+  mode?: 'FULL' | 'INCREMENTAL';
+  attempts?: number;
   orgLabel?: string;
   orgUsername?: string;
 }
@@ -78,6 +81,9 @@ export interface RunItem {
   sha256: string | null;
   note: string | null;
   error: string | null;
+  mode?: 'FULL' | 'INCREMENTAL' | null;
+  changedCount?: number | null;
+  deletedCount?: number | null;
   downloadable: boolean;
 }
 
@@ -122,6 +128,9 @@ export interface Settings {
   alertOnFailure: boolean;
   alertEmail: string | null;
   sessionHours: number;
+  legalHold: boolean;
+  legalHoldReason: string | null;
+  legalHoldAt: string | null;
 }
 
 export interface TeamUser {

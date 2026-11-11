@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import { app, makePlatformAdmin, resetDb, signUp } from './helpers.js';
+import { app, makePlatformAdmin, resetDb, signUp, signupHooks } from './helpers.js';
 import { prisma } from '../src/db.js';
 
 // A pretend mail server: remembers every message, and can be told to refuse.
@@ -21,6 +21,7 @@ const smtp = { host: 'smtp.example.com', port: 587, secure: false, username: 'ma
 const NEW_PASSWORD = 'brand-new-password-9';
 
 beforeAll(resetDb);
+signupHooks.afterConfirmationMail = () => { mail.sent.length = 0; };
 beforeEach(() => {
   mail.sent.length = 0;
   mail.fail = false;

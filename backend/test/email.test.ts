@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import { app, makeConnection, makePlatformAdmin, resetDb, signUp } from './helpers.js';
+import { app, makeConnection, makePlatformAdmin, resetDb, signUp, signupHooks } from './helpers.js';
 import { prisma } from '../src/db.js';
 import { sendRunAlert } from '../src/backup/alerts.js';
 import { waitForRun } from '../src/backup/runner.js';
@@ -23,6 +23,7 @@ vi.mock('nodemailer', () => ({
 const smtp = { host: 'smtp.example.com', port: 587, secure: false, username: 'mailer', password: 'mail-pass-123', fromEmail: 'alerts@example.com', fromName: 'CloudBackup' };
 
 beforeAll(resetDb);
+signupHooks.afterConfirmationMail = () => { mail.sent.length = 0; };
 beforeEach(() => {
   mail.sent.length = 0;
   mail.fail = null;

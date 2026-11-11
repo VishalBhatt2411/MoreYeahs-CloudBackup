@@ -16,6 +16,15 @@ const schema = z.object({
   SF_LOGIN_URL_PRODUCTION: z.string().url().default('https://login.salesforce.com'),
   SF_LOGIN_URL_SANDBOX: z.string().url().default('https://test.salesforce.com'),
   BCRYPT_COST: z.coerce.number().default(12),
+  // Where backup files are kept. Only the server's disk is built; "s3" is reserved for later.
+  STORAGE_DRIVER: z.enum(['local']).default('local'),
+  // "embedded": this server also runs the backups. "external": run "npm run worker" as a separate process.
+  WORKER_MODE: z.enum(['embedded', 'external']).default('embedded'),
+  WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
+  // Objects with at least this many rows are copied with the Bulk API 2.0 instead of the REST API.
+  BULK_THRESHOLD_ROWS: z.coerce.number().int().min(1).default(50000),
+  // An incremental backup is forced to be a full copy once the last full copy is this old.
+  FULL_REFRESH_DAYS: z.coerce.number().min(0).default(7),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -45,6 +54,18 @@ export const config = {
     SANDBOX: env.SF_LOGIN_URL_SANDBOX.replace(/\/+$/, ''),
   },
   bcryptCost: env.BCRYPT_COST,
+  storageDriver: env.STORAGE_DRIVER,
+  workerMode: env.WORKER_MODE,
+  workerConcurrency: env.WORKER_CONCURRENCY,
+  bulkThresholdRows: env.BULK_THRESHOLD_ROWS,
+  fullRefreshDays: env.FULL_REFRESH_DAYS,
+  /** How many times one backup may be started (first try plus restarts after an interruption or a failed connection). */
+  maxRunAttempts: 3,
+  /** A running backup renews its claim this often; a claim that is not renewed for leaseSeconds means the worker died. */
+  leaseSeconds: env.NODE_ENV === 'test' ? 4 : 90,
+  heartbeatSeconds: env.NODE_ENV === 'test' ? 1 : 20,
+  /** Pause before a failed item or a failed connection is tried again. */
+  retryDelayMs: env.NODE_ENV === 'test' ? 0 : 30_000,
   /** Address Salesforce sends the user back to after login. Must match the Connected App. */
   oauthCallbackUrl: `${env.APP_URL.replace(/\/+$/, '')}/api/oauth/salesforce/callback`,
 } as const;

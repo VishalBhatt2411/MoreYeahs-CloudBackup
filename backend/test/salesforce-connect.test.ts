@@ -163,7 +163,7 @@ describe('customer connects a Salesforce org (login flow)', () => {
     const viewerEmail = `viewer-${Date.now()}@example.com`;
     const ownerRow = await prisma.user.findFirstOrThrow({ where: { id: owner.user.id } });
     await prisma.user.create({
-      data: { email: viewerEmail, name: 'Viewer', passwordHash: ownerRow.passwordHash, role: 'VIEWER', tenantId: owner.user.tenant.id },
+      data: { email: viewerEmail, name: 'Viewer', passwordHash: ownerRow.passwordHash, role: 'VIEWER', tenantId: owner.user.tenant.id, emailVerifiedAt: new Date() },
     });
     const v = request.agent(app);
     await v.post('/api/auth/login').send({ email: viewerEmail, password: 'a-long-test-password' }).expect(200);

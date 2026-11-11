@@ -9,6 +9,7 @@ import { sameOriginOnly } from './middleware/auth.js';
 import { authRouter } from './routes/auth.js';
 import { connectionsRouter } from './routes/connections.js';
 import { dashboardRouter } from './routes/dashboard.js';
+import { explorerRouter } from './routes/explorer.js';
 import { oauthRouter } from './routes/oauth.js';
 import { platformRouter, salesforceStatusRouter } from './routes/platform.js';
 import { auditRouter, downloadsRouter, runsRouter } from './routes/runs.js';
@@ -34,6 +35,7 @@ export function createApp() {
   app.use('/api/downloads', downloadsRouter);
   app.use('/api/audit', auditRouter);
   app.use('/api/dashboard', dashboardRouter);
+  app.use('/api/explorer', explorerRouter);
   app.use('/api/settings', settingsRouter);
   app.use('/api/team', teamRouter);
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));

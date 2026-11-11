@@ -163,6 +163,7 @@ connectionsRouter.post(
       .object({
         includeMetadata: z.boolean().optional(),
         objects: z.array(z.string().regex(/^[A-Za-z0-9_]+$/)).max(2000).optional(),
+        fullCopy: z.boolean().optional(),
       })
       .parse(req.body ?? {});
     const c = await findMine(req.user!.tenantId, req.params.id);

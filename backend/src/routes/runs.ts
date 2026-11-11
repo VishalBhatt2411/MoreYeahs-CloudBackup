@@ -1,14 +1,12 @@
-import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { basename, posix } from 'node:path';
 import archiver from 'archiver';
 import { Router } from 'express';
 import { prisma } from '../db.js';
 import { audit } from '../lib/audit.js';
 import { signToken, verifyToken } from '../lib/crypto.js';
 import { HttpError, wrap } from '../lib/http.js';
-import { requireAuth } from '../middleware/auth.js';
-import { runRelDir, safeAbsPath } from '../backup/storage.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
+import { getStorage, guardTenantPath, runRelDir } from '../backup/storage.js';
 
 export const runsRouter = Router();
 export const downloadsRouter = Router();
@@ -19,7 +17,10 @@ auditRouter.use(requireAuth);
 
 const runView = (r: {
   id: string; connectionId: string; status: string; trigger: string; createdAt: Date; startedAt: Date | null; finishedAt: Date | null; message: string | null;
+  mode?: string; attempts?: number;
 }) => ({
+  mode: r.mode,
+  attempts: r.attempts,
   id: r.id,
   connectionId: r.connectionId,
   status: r.status,
@@ -78,6 +79,9 @@ runsRouter.get(
           sha256: i.sha256,
           note: i.note,
           error: i.error,
+          mode: i.mode,
+          changedCount: i.changedCount,
+          deletedCount: i.deletedCount,
           downloadable: !!i.filePath,
         })),
       },
@@ -88,6 +92,8 @@ runsRouter.get(
 /** Gives a short-lived signed link. The link works without a cookie, for 10 minutes only. */
 runsRouter.post(
   '/:id/download-link',
+  // An Auditor can inspect but not take copies of the data out.
+  requireRole('OWNER', 'ADMIN', 'VIEWER'),
   wrap(async (req, res) => {
     const run = await prisma.backupRun.findFirst({ where: { id: req.params.id, tenantId: req.user!.tenantId } });
     if (!run) throw new HttpError(404, 'Backup run not found.');
@@ -113,23 +119,27 @@ downloadsRouter.get(
     if (payload.i) {
       const item = await prisma.backupItem.findFirst({ where: { id: payload.i, runId: run.id, tenantId: run.tenantId } });
       if (!item?.filePath) throw new HttpError(404, 'That item has no saved file.');
-      const abs = safeAbsPath(run.tenantId, item.filePath);
-      const info = await stat(abs).catch(() => null);
-      if (info?.isFile()) {
-        res.setHeader('Content-Disposition', `attachment; filename="${basename(abs)}"`);
+      const rel = guardTenantPath(run.tenantId, item.filePath);
+      const storage = getStorage();
+      const size = await storage.fileSize(rel);
+      if (size !== null) {
+        res.setHeader('Content-Disposition', `attachment; filename="${basename(rel).replace(/[^A-Za-z0-9_.-]/g, '_')}"`);
         res.setHeader('Content-Type', 'application/octet-stream');
-        createReadStream(abs).pipe(res);
+        res.setHeader('Content-Length', String(size));
+        storage.openRead(rel).pipe(res);
         return;
       }
       // A metadata item is a folder of zips: send the folder as one zip.
-      zipFolder(res, safeAbsPath(run.tenantId, item.filePath), `${item.name}.zip`);
+      await zipFolder(res, rel, `${item.name}.zip`);
       return;
     }
-    zipFolder(res, safeAbsPath(run.tenantId, runRelDir(run.tenantId, run.connectionId, run.id)), `backup-${run.id}.zip`);
+    await zipFolder(res, guardTenantPath(run.tenantId, runRelDir(run.tenantId, run.connectionId, run.id)), `backup-${run.id}.zip`);
   }),
 );
 
-function zipFolder(res: import('express').Response, absDir: string, name: string) {
+async function zipFolder(res: import('express').Response, relDir: string, name: string) {
+  const storage = getStorage();
+  const files = await storage.listFiles(relDir);
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/[^A-Za-z0-9_.-]/g, '_')}"`);
   const zip = archiver('zip', { zlib: { level: 1 } });
@@ -138,8 +148,8 @@ function zipFolder(res: import('express').Response, absDir: string, name: string
     res.destroy(e);
   });
   zip.pipe(res);
-  zip.directory(absDir, false);
-  void zip.finalize();
+  for (const f of files) zip.append(storage.openRead(posix.join(relDir, f)), { name: f });
+  await zip.finalize();
 }
 
 auditRouter.get(

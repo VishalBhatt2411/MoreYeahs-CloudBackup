@@ -18,6 +18,18 @@ export interface FieldInfo {
   compoundFieldName?: string | null;
 }
 
+export interface QueryOptions {
+  /** Also return rows that were deleted (in the recycle bin) or merged away. Used to find deletions. */
+  includeDeleted?: boolean;
+}
+
+export interface BulkQueryOptions extends QueryOptions {
+  /** Field name -> Salesforce field type. Bulk returns text; this turns numbers and booleans back into real values. */
+  fieldTypes?: Record<string, string>;
+  /** What the object's row count was just before the query (becomes each page's totalSize). */
+  expectedRows?: number;
+}
+
 export interface MetadataTypeInfo {
   xmlName: string;
   inFolder: boolean;
@@ -46,7 +58,11 @@ export interface SfGateway {
   readonly apiVersion: string;
   describeGlobal(): Promise<ObjectInfo[]>;
   describeFields(objectName: string): Promise<FieldInfo[]>;
-  queryPages(soql: string): AsyncGenerator<QueryPage>;
+  /** How many rows the object has right now (a cheap COUNT query). */
+  countRows(objectName: string): Promise<number>;
+  queryPages(soql: string, opts?: QueryOptions): AsyncGenerator<QueryPage>;
+  /** Same rows as queryPages, fetched as a Bulk API 2.0 job. For very large objects. */
+  bulkQueryPages(soql: string, opts?: BulkQueryOptions): AsyncGenerator<QueryPage>;
   describeMetadataTypes(): Promise<MetadataTypeInfo[]>;
   listMetadata(type: string, inFolder: boolean): Promise<MetadataMember[]>;
   /** `types` maps a metadata type name to the member names to fetch. */
@@ -54,6 +70,25 @@ export interface SfGateway {
 }
 
 export type GatewayFactory = (connection: OrgConnection) => Promise<SfGateway>;
+
+const NUMBER_TYPES = new Set(['int', 'double', 'currency', 'percent', 'long']);
+
+/** Bulk results are all text. Give numbers and booleans their real type and turn empty text into null. */
+export function coerceBulkRow(raw: Record<string, unknown>, types: Record<string, string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (k === 'attributes') continue;
+    if (v === '' || v === undefined || v === null) {
+      out[k] = null;
+      continue;
+    }
+    const t = types[k];
+    if (t === 'boolean') out[k] = v === 'true' || v === true;
+    else if (NUMBER_TYPES.has(t ?? '') && typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) out[k] = Number(v);
+    else out[k] = v;
+  }
+  return out;
+}
 
 class JsforceGateway implements SfGateway {
   constructor(
@@ -80,13 +115,36 @@ class JsforceGateway implements SfGateway {
     return d.fields.map((f) => ({ name: f.name, type: f.type, compoundFieldName: f.compoundFieldName }));
   }
 
-  async *queryPages(soql: string): AsyncGenerator<QueryPage> {
-    let r = await this.conn.query(soql);
+  async countRows(objectName: string): Promise<number> {
+    const r = await this.conn.query(`SELECT COUNT() FROM ${objectName}`);
+    return r.totalSize;
+  }
+
+  async *queryPages(soql: string, opts: QueryOptions = {}): AsyncGenerator<QueryPage> {
+    let r = await this.conn.query(soql, opts.includeDeleted ? { scanAll: true } : {});
     yield { records: r.records as Record<string, unknown>[], totalSize: r.totalSize };
     while (!r.done && r.nextRecordsUrl) {
       r = await this.conn.queryMore(r.nextRecordsUrl);
       yield { records: r.records as Record<string, unknown>[], totalSize: r.totalSize };
     }
+  }
+
+  async *bulkQueryPages(soql: string, opts: BulkQueryOptions = {}): AsyncGenerator<QueryPage> {
+    const stream = await this.conn.bulk2.query(soql, {
+      scanAll: !!opts.includeDeleted,
+      pollInterval: 5000,
+      pollTimeout: 60 * 60 * 1000,
+    });
+    const total = opts.expectedRows ?? 0;
+    let batch: Record<string, unknown>[] = [];
+    for await (const raw of stream as AsyncIterable<Record<string, unknown>>) {
+      batch.push(coerceBulkRow(raw, opts.fieldTypes ?? {}));
+      if (batch.length >= 2000) {
+        yield { records: batch, totalSize: total };
+        batch = [];
+      }
+    }
+    if (batch.length > 0 || total === 0) yield { records: batch, totalSize: total };
   }
 
   async describeMetadataTypes(): Promise<MetadataTypeInfo[]> {

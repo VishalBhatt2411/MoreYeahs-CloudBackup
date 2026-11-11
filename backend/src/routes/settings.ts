@@ -1,15 +1,19 @@
 import { randomBytes } from 'node:crypto';
+import bcrypt from 'bcryptjs';
 import { Router } from 'express';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { prisma } from '../db.js';
 import { alertRecipients } from '../backup/alerts.js';
 import { previewRetention } from '../backup/retention.js';
+import { getStorage, guardTenantPath } from '../backup/storage.js';
+import { decrypt } from '../lib/crypto.js';
 import { explainMailError, isEmailConfigured, renderEmail, sendMail } from '../lib/mail.js';
 import { audit } from '../lib/audit.js';
 import { HttpError, wrap } from '../lib/http.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
-import { hashInviteToken } from './auth.js';
+import { clearSessionCookie, requireAuth, requireRole } from '../middleware/auth.js';
+import { revokeToken } from '../salesforce/oauth.js';
+import { hashInviteToken, sendResetEmail } from './auth.js';
 
 export const settingsRouter = Router();
 export const teamRouter = Router();
@@ -38,7 +42,13 @@ const tenantView = (t: {
   alertOnFailure: boolean;
   alertEmail: string | null;
   sessionHours: number;
+  legalHold: boolean;
+  legalHoldReason: string | null;
+  legalHoldAt: Date | null;
 }) => ({
+  legalHold: t.legalHold,
+  legalHoldReason: t.legalHoldReason,
+  legalHoldAt: t.legalHoldAt,
   name: t.name,
   timeZone: t.timeZone,
   retentionDays: t.retentionDays,
@@ -147,6 +157,94 @@ settingsRouter.post(
   }),
 );
 
+// ---------- Legal hold and data deletion ----------
+
+// While a legal hold is on, nothing may be deleted automatically or by hand (retention is frozen).
+settingsRouter.put(
+  '/legal-hold',
+  requireRole('OWNER'),
+  wrap(async (req, res) => {
+    const body = z
+      .object({ enabled: z.boolean(), reason: z.string().trim().max(300).optional() })
+      .refine((b) => !b.enabled || !!b.reason, { message: 'Say why the hold is being applied.', path: ['reason'] })
+      .parse(req.body);
+    const t = await prisma.tenant.update({
+      where: { id: req.user!.tenantId },
+      data: body.enabled
+        ? { legalHold: true, legalHoldReason: body.reason, legalHoldAt: new Date() }
+        : { legalHold: false, legalHoldReason: null, legalHoldAt: null },
+    });
+    await audit(t.id, req.user!.id, body.enabled ? 'legalhold.on' : 'legalhold.off', null, body.reason ?? null);
+    res.json({ settings: tenantView(t) });
+  }),
+);
+
+async function refuseIfBusyOrHeld(tenantId: string) {
+  const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+  if (tenant.legalHold) {
+    throw new HttpError(409, 'A legal hold is on, so nothing can be deleted. Turn the hold off first.', 'legal_hold');
+  }
+  const busy = await prisma.backupRun.count({ where: { tenantId, status: { in: ['QUEUED', 'RUNNING'] } } });
+  if (busy > 0) throw new HttpError(409, 'A backup is queued or running. Wait for it to finish, then try again.', 'run_active');
+  return tenant;
+}
+
+// Deletes every saved backup and its files. The account, team and connected orgs stay.
+settingsRouter.post(
+  '/delete-backups',
+  requireRole('OWNER'),
+  wrap(async (req, res) => {
+    const body = z.object({ confirm: z.string() }).parse(req.body);
+    const tenant = await refuseIfBusyOrHeld(req.user!.tenantId);
+    if (body.confirm !== tenant.name) throw new HttpError(400, 'Type the company name exactly to confirm.');
+    const runs = await prisma.backupRun.count({ where: { tenantId: tenant.id } });
+    await getStorage().removeTree(guardTenantPath(tenant.id, `tenants/${tenant.id}/orgs`));
+    await prisma.$transaction([
+      prisma.objectCheckpoint.deleteMany({ where: { tenantId: tenant.id } }),
+      prisma.backupRun.deleteMany({ where: { tenantId: tenant.id } }), // items go with their run
+      prisma.alertLog.deleteMany({ where: { tenantId: tenant.id } }),
+    ]);
+    await audit(tenant.id, req.user!.id, 'tenant.backups.deleted', null, `${runs} backup(s)`);
+    res.json({ deleted: runs });
+  }),
+);
+
+// Removes the whole company: org logins (revoked at Salesforce), files, accounts and records.
+settingsRouter.delete(
+  '/tenant',
+  requireRole('OWNER'),
+  wrap(async (req, res) => {
+    const body = z.object({ confirm: z.string(), password: z.string().min(1) }).parse(req.body);
+    const tenant = await refuseIfBusyOrHeld(req.user!.tenantId);
+    if (body.confirm !== tenant.name) throw new HttpError(400, 'Type the company name exactly to confirm.');
+    const me = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
+    if (!(await bcrypt.compare(body.password, me.passwordHash))) throw new HttpError(400, 'Your password is not correct.');
+    if ((await prisma.user.count({ where: { tenantId: tenant.id, isPlatformAdmin: true } })) > 0) {
+      throw new HttpError(400, 'This company holds the platform administrator account, so it cannot be deleted.');
+    }
+    // Tell Salesforce to forget our access first (best effort), so nothing is left that could be used.
+    const conns = await prisma.orgConnection.findMany({ where: { tenantId: tenant.id } });
+    for (const c of conns) {
+      if (!c.refreshTokenEnc) continue;
+      try {
+        await revokeToken({ loginUrl: c.loginUrl, token: decrypt(c.refreshTokenEnc) });
+      } catch {
+        /* best effort */
+      }
+    }
+    await getStorage().removeTree(guardTenantPath(tenant.id, `tenants/${tenant.id}/`));
+    await prisma.$transaction([
+      prisma.alertLog.deleteMany({ where: { tenantId: tenant.id } }),
+      prisma.oAuthState.deleteMany({ where: { tenantId: tenant.id } }),
+      prisma.tenant.delete({ where: { id: tenant.id } }), // users, orgs, runs, items, audit rows go with it
+    ]);
+    // The company's own audit rows are gone with it; leave one line that says what happened.
+    await audit(null, null, 'tenant.deleted', tenant.id, `${tenant.name} (by ${me.email})`);
+    clearSessionCookie(res);
+    res.json({ ok: true });
+  }),
+);
+
 // ---------- Team ----------
 
 const INVITE_DAYS = 7;
@@ -176,7 +274,7 @@ teamRouter.post(
   requireRole('OWNER'),
   wrap(async (req, res) => {
     const body = z
-      .object({ email: z.string().trim().toLowerCase().email('Enter a valid email'), role: z.enum(['OWNER', 'ADMIN', 'VIEWER']) })
+      .object({ email: z.string().trim().toLowerCase().email('Enter a valid email'), role: z.enum(['OWNER', 'ADMIN', 'VIEWER', 'AUDITOR']) })
       .parse(req.body);
     const tenantId = req.user!.tenantId;
     if (await prisma.user.findUnique({ where: { email: body.email } })) {
@@ -244,7 +342,7 @@ teamRouter.patch(
   '/users/:id',
   requireRole('OWNER'),
   wrap(async (req, res) => {
-    const body = z.object({ role: z.enum(['OWNER', 'ADMIN', 'VIEWER']).optional(), active: z.boolean().optional() }).parse(req.body);
+    const body = z.object({ role: z.enum(['OWNER', 'ADMIN', 'VIEWER', 'AUDITOR']).optional(), active: z.boolean().optional() }).parse(req.body);
     const tenantId = req.user!.tenantId;
     const target = await prisma.user.findFirst({ where: { id: String(req.params.id), tenantId } });
     if (!target) throw new HttpError(404, 'User not found.');
@@ -252,7 +350,7 @@ teamRouter.patch(
     if (target.isPlatformAdmin && (body.active === false)) {
       throw new HttpError(400, 'The platform administrator account cannot be switched off.');
     }
-    const losesOwner = target.role === 'OWNER' && target.active && (body.role === 'ADMIN' || body.role === 'VIEWER' || body.active === false);
+    const losesOwner = target.role === 'OWNER' && target.active && ((body.role !== undefined && body.role !== 'OWNER') || body.active === false);
     if (losesOwner) {
       const others = await prisma.user.count({ where: { tenantId, role: 'OWNER', active: true, id: { not: target.id } } });
       if (others === 0) throw new HttpError(400, 'A company must keep at least one active owner.');
@@ -263,5 +361,29 @@ teamRouter.patch(
       await audit(tenantId, req.user!.id, body.active ? 'team.user.enabled' : 'team.user.disabled', target.email);
     }
     res.json({ user: { id: updated.id, role: updated.role, active: updated.active } });
+  }),
+);
+
+// The owner sends a team member a "choose a new password" email. The owner never sees or sets
+// the password, and cannot do this for themselves (they use "Forgot password" for that).
+teamRouter.post(
+  '/users/:id/reset-password',
+  requireRole('OWNER'),
+  wrap(async (req, res) => {
+    const tenantId = req.user!.tenantId;
+    const target = await prisma.user.findFirst({ where: { id: String(req.params.id), tenantId } });
+    if (!target) throw new HttpError(404, 'User not found.');
+    if (target.id === req.user!.id) throw new HttpError(400, 'Use "Forgot password" on the sign-in page for your own account.');
+    if (!target.active) throw new HttpError(400, 'This account is switched off. Turn it on first.');
+    if (!(await isEmailConfigured())) {
+      throw new HttpError(409, 'Email is not set up on this platform, so a reset link cannot be sent.', 'email_not_configured');
+    }
+    try {
+      await sendResetEmail(target);
+    } catch (e) {
+      throw new HttpError(502, explainMailError(e));
+    }
+    await audit(tenantId, req.user!.id, 'team.reset.sent', target.email);
+    res.json({ ok: true });
   }),
 );

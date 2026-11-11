@@ -36,6 +36,7 @@ export default function OrgDetail() {
   const [coverageError, setCoverageError] = useState<string | null>(null);
 
   const [includeMetadata, setIncludeMetadata] = useState(true);
+  const [fullCopy, setFullCopy] = useState(false);
   const [pickObjects, setPickObjects] = useState(false);
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState('');
@@ -65,7 +66,8 @@ export default function OrgDetail() {
   }
 
   async function startBackup() {
-    const body: { includeMetadata: boolean; objects?: string[] } = { includeMetadata };
+    const body: { includeMetadata: boolean; objects?: string[]; fullCopy?: boolean } = { includeMetadata };
+    if (fullCopy) body.fullCopy = true;
     if (pickObjects) body.objects = [...chosen];
     const r = await act('run', () => api<{ run: { id: string } }>(`/connections/${id}/runs`, { method: 'POST', body }));
     if (r) navigate(`/runs/${r.run.id}`);
@@ -137,6 +139,10 @@ export default function OrgDetail() {
             <>
               <div className="field">
                 <label><input type="checkbox" checked={includeMetadata} onChange={(e) => setIncludeMetadata(e.target.checked)} /> Include metadata</label>
+              </div>
+              <div className="field">
+                <label><input type="checkbox" checked={fullCopy} onChange={(e) => setFullCopy(e.target.checked)} /> Read everything again (full copy)</label>
+                <small>By default only records changed since the last good backup are read from Salesforce, and the rest is carried over, so each backup is still a complete snapshot. Tick this to re-read every record.</small>
               </div>
               <div className="field">
                 <label><input type="checkbox" checked={pickObjects} onChange={(e) => { setPickObjects(e.target.checked); if (e.target.checked && !coverage) void loadCoverage(); }} /> Choose which objects to back up (default: all that can be copied)</label>

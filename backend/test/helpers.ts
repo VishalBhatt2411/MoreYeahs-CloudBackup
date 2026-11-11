@@ -13,9 +13,11 @@ export const CLIENT_SECRET = 'valid-secret-abcdefghij-0123456789';
 export async function resetDbEmpty() {
   await prisma.auditLog.deleteMany();
   await prisma.passwordReset.deleteMany();
+  await prisma.emailVerification.deleteMany();
   await prisma.oAuthState.deleteMany();
   await prisma.backupItem.deleteMany();
   await prisma.backupRun.deleteMany();
+  await prisma.objectCheckpoint.deleteMany();
   await prisma.orgConnection.deleteMany();
   await prisma.user.deleteMany();
   await prisma.tenant.deleteMany();
@@ -38,6 +40,9 @@ export async function resetDb() {
   });
 }
 
+/** Test files that fake the mail server set this to forget the sign-up confirmation email. */
+export const signupHooks: { afterConfirmationMail: null | (() => void) } = { afterConfirmationMail: null };
+
 let counter = 0;
 /** Registers a new customer (own workspace) and returns a logged-in agent. */
 export async function signUp(label = 'Acme') {
@@ -47,6 +52,15 @@ export async function signUp(label = 'Acme') {
     .post('/api/auth/register')
     .send({ workspaceName: `${label} Inc`, name: label, email, password: 'a-long-test-password' });
   if (res.status !== 201 && res.status !== 200) throw new Error(`register failed: ${res.status} ${JSON.stringify(res.body)}`);
+  if (res.body.verificationRequired) {
+    // Mail is set up in this test, so the account must confirm its email first. Tests that are not
+    // about confirmation just mark it confirmed and sign in (verification.test.ts covers the real flow).
+    signupHooks.afterConfirmationMail?.();
+    await prisma.user.update({ where: { email }, data: { emailVerifiedAt: new Date() } });
+    const login = await agent.post('/api/auth/login').send({ email, password: 'a-long-test-password' });
+    if (login.status !== 200) throw new Error(`login after register failed: ${login.status} ${JSON.stringify(login.body)}`);
+    return { agent, email, user: login.body.user as { id: string; tenant: { id: string } } };
+  }
   return { agent, email, user: res.body.user as { id: string; tenant: { id: string } } };
 }
 

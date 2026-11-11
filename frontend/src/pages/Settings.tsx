@@ -61,7 +61,7 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState<Form | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [preview, setPreview] = useState<{ runs: number; bytes: number } | null>(null);
+  const [preview, setPreview] = useState<{ runs: number; bytes: number; legalHold?: boolean } | null>(null);
 
   useEffect(() => {
     if (loaded.data) {
@@ -81,7 +81,7 @@ export default function SettingsPage() {
     }
     let off = false;
     const t = window.setTimeout(() => {
-      api<{ runs: number; bytes: number }>(`/settings/retention-preview?days=${n}`)
+      api<{ runs: number; bytes: number; legalHold?: boolean }>(`/settings/retention-preview?days=${n}`)
         .then((p) => !off && setPreview(p))
         .catch(() => !off && setPreview(null));
     }, 300);
@@ -108,7 +108,7 @@ export default function SettingsPage() {
     e.preventDefault();
     if (!form) return;
     setError(null);
-    if (retentionChanged && form.retentionDays && preview && preview.runs > 0) {
+    if (retentionChanged && form.retentionDays && preview && preview.runs > 0 && !preview.legalHold) {
       const ok = window.confirm(
         `Keeping backups for ${form.retentionDays} days will permanently delete ${preview.runs} existing backup(s) (${formatBytes(preview.bytes)}) within the hour. This cannot be undone. Continue?`,
       );
@@ -226,7 +226,10 @@ export default function SettingsPage() {
             <input id="rt" type="number" min={1} max={3650} placeholder="Forever" value={form.retentionDays} onChange={(e) => set('retentionDays', e.target.value)} disabled={ro} />
             <small>Leave empty to keep backups forever.</small>
           </div>
-          {preview && (
+          {loaded.data.settings.legalHold && (
+            <Notice kind="warn">A legal hold is on, so nothing is deleted automatically, whatever period is set here. The period applies again when the hold is lifted.</Notice>
+          )}
+          {preview && !loaded.data.settings.legalHold && (
             preview.runs > 0 ? (
               <Notice kind="warn">
                 With {form.retentionDays} days, <b>{preview.runs}</b> existing backup(s) ({formatBytes(preview.bytes)}) would be permanently deleted.
@@ -298,8 +301,9 @@ export default function SettingsPage() {
       </form>
 
       <PasswordPanel onDone={() => toast.show('Password changed')} />
-      <TeamPanel isOwner={isOwner} meId={user!.id} />
+      <TeamPanel isOwner={isOwner} meId={user!.id} emailConfigured={emailConfigured} />
       <PermissionsPanel />
+      {isOwner && <DataPanel settings={loaded.data.settings} onChanged={() => loaded.reload()} onToast={toast.show} />}
       {toast.node}
     </>
   );
@@ -347,7 +351,7 @@ function PasswordPanel({ onDone }: { onDone: () => void }) {
   );
 }
 
-function TeamPanel({ isOwner, meId }: { isOwner: boolean; meId: string }) {
+function TeamPanel({ isOwner, meId, emailConfigured }: { isOwner: boolean; meId: string; emailConfigured: boolean }) {
   const team = useLoad(() => api<{ users: TeamUser[]; invites: TeamInvite[] }>('/team'), []);
   const toast = useToast();
   const [email, setEmail] = useState('');
@@ -416,6 +420,7 @@ function TeamPanel({ isOwner, meId }: { isOwner: boolean; meId: string }) {
             <label htmlFor="ir">Role</label>
             <select id="ir" value={role} onChange={(e) => setRole(e.target.value as Role)}>
               <option value="VIEWER">Viewer</option>
+              <option value="AUDITOR">Auditor (read-only, no export)</option>
               <option value="ADMIN">Admin</option>
               <option value="OWNER">Owner</option>
             </select>
@@ -458,6 +463,7 @@ function TeamPanel({ isOwner, meId }: { isOwner: boolean; meId: string }) {
                         onChange={(e) => void act(() => api(`/team/users/${u.id}`, { method: 'PATCH', body: { role: e.target.value } }), 'Role updated')}
                       >
                         <option value="VIEWER">Viewer</option>
+                        <option value="AUDITOR">Auditor</option>
                         <option value="ADMIN">Admin</option>
                         <option value="OWNER">Owner</option>
                       </select>
@@ -470,12 +476,28 @@ function TeamPanel({ isOwner, meId }: { isOwner: boolean; meId: string }) {
                   {isOwner && (
                     <td>
                       {!me && (
-                        <button
-                          className={`btn small ${u.active ? 'danger' : 'secondary'}`}
-                          onClick={() => void act(() => api(`/team/users/${u.id}`, { method: 'PATCH', body: { active: !u.active } }), u.active ? 'User switched off' : 'User switched on')}
-                        >
-                          {u.active ? 'Switch off' : 'Switch on'}
-                        </button>
+                        <div className="row gap" style={{ marginTop: 0 }}>
+                          {u.active && (
+                            <button
+                              className="btn small secondary"
+                              disabled={!emailConfigured}
+                              title={emailConfigured ? 'Emails them a link to choose a new password' : 'Email is not set up on this server'}
+                              onClick={() => {
+                                if (window.confirm(`Email ${u.email} a link to choose a new password? Their current password keeps working until they use it.`)) {
+                                  void act(() => api(`/team/users/${u.id}/reset-password`, { method: 'POST', body: {} }), `Reset email sent to ${u.email}`);
+                                }
+                              }}
+                            >
+                              Send reset email
+                            </button>
+                          )}
+                          <button
+                            className={`btn small ${u.active ? 'danger' : 'secondary'}`}
+                            onClick={() => void act(() => api(`/team/users/${u.id}`, { method: 'PATCH', body: { active: !u.active } }), u.active ? 'User switched off' : 'User switched on')}
+                          >
+                            {u.active ? 'Switch off' : 'Switch on'}
+                          </button>
+                        </div>
                       )}
                     </td>
                   )}
@@ -515,13 +537,15 @@ function TeamPanel({ isOwner, meId }: { isOwner: boolean; meId: string }) {
   );
 }
 
-const PERMS: { what: string; owner: boolean; admin: boolean; viewer: boolean }[] = [
-  { what: 'See dashboard, orgs, backups and activity', owner: true, admin: true, viewer: true },
-  { what: 'Download backup files', owner: true, admin: true, viewer: true },
-  { what: 'Connect or disconnect Salesforce orgs', owner: true, admin: true, viewer: false },
-  { what: 'Run backups and set an org schedule', owner: true, admin: true, viewer: false },
-  { what: 'Change company settings (time zone, retention, alerts)', owner: true, admin: false, viewer: false },
-  { what: 'Invite people and change roles', owner: true, admin: false, viewer: false },
+const PERMS: { what: string; owner: boolean; admin: boolean; viewer: boolean; auditor: boolean }[] = [
+  { what: 'See dashboard, orgs, backups and activity', owner: true, admin: true, viewer: true, auditor: true },
+  { what: 'Browse and search records in the data explorer', owner: true, admin: true, viewer: true, auditor: true },
+  { what: 'Download backup files and export CSV', owner: true, admin: true, viewer: true, auditor: false },
+  { what: 'Connect or disconnect Salesforce orgs', owner: true, admin: true, viewer: false, auditor: false },
+  { what: 'Run backups and set an org schedule', owner: true, admin: true, viewer: false, auditor: false },
+  { what: 'Change company settings (time zone, retention, alerts)', owner: true, admin: false, viewer: false, auditor: false },
+  { what: 'Invite people, change roles, send a password reset', owner: true, admin: false, viewer: false, auditor: false },
+  { what: 'Legal hold, and deleting backups or the company', owner: true, admin: false, viewer: false, auditor: false },
 ];
 
 function PermissionsPanel() {
@@ -531,13 +555,121 @@ function PermissionsPanel() {
       <div className="panel-head"><div><h2>Role permissions</h2><p>What each role can do. This list is fixed.</p></div></div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>ACTION</th><th>OWNER</th><th>ADMIN</th><th>VIEWER</th></tr></thead>
+          <thead><tr><th>ACTION</th><th>OWNER</th><th>ADMIN</th><th>VIEWER</th><th>AUDITOR</th></tr></thead>
           <tbody>
             {PERMS.map((p) => (
-              <tr key={p.what}><td>{p.what}</td><td>{mark(p.owner)}</td><td>{mark(p.admin)}</td><td>{mark(p.viewer)}</td></tr>
+              <tr key={p.what}><td>{p.what}</td><td>{mark(p.owner)}</td><td>{mark(p.admin)}</td><td>{mark(p.viewer)}</td><td>{mark(p.auditor)}</td></tr>
             ))}
           </tbody>
         </table>
+      </div>
+    </section>
+  );
+}
+
+/** Owner-only: legal hold, and permanent deletion of backups or the whole company. */
+function DataPanel({ settings, onChanged, onToast }: { settings: Settings; onChanged: () => void; onToast: (m: string) => void }) {
+  const [reason, setReason] = useState(settings.legalHoldReason ?? '');
+  const [holdError, setHoldError] = useState<string | null>(null);
+  const [holdBusy, setHoldBusy] = useState(false);
+  const [confirmName, setConfirmName] = useState('');
+  const [password, setPassword] = useState('');
+  const [delError, setDelError] = useState<string | null>(null);
+  const [delBusy, setDelBusy] = useState<null | 'backups' | 'company'>(null);
+  const nameOk = confirmName === settings.name;
+
+  async function setHold(enabled: boolean) {
+    setHoldError(null);
+    setHoldBusy(true);
+    try {
+      await api('/settings/legal-hold', { method: 'PUT', body: { enabled, reason: enabled ? reason.trim() : undefined } });
+      onToast(enabled ? 'Legal hold switched on' : 'Legal hold lifted');
+      onChanged();
+    } catch (err) {
+      setHoldError(errText(err));
+    } finally {
+      setHoldBusy(false);
+    }
+  }
+
+  async function deleteBackups() {
+    setDelError(null);
+    setDelBusy('backups');
+    try {
+      const r = await api<{ deleted: number }>('/settings/delete-backups', { method: 'POST', body: { confirm: confirmName } });
+      setConfirmName('');
+      onToast(`Deleted ${r.deleted} backup(s)`);
+    } catch (err) {
+      setDelError(errText(err));
+    } finally {
+      setDelBusy(null);
+    }
+  }
+
+  async function deleteCompany() {
+    if (!window.confirm(`This permanently deletes ${settings.name}: every backup, org connection and person. It cannot be undone. Continue?`)) return;
+    setDelError(null);
+    setDelBusy('company');
+    try {
+      await api('/settings/tenant', { method: 'DELETE', body: { confirm: confirmName, password } });
+      // The account is gone; a full page load clears everything this browser knew.
+      window.location.assign('/login');
+    } catch (err) {
+      setDelError(errText(err));
+      setDelBusy(null);
+    }
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <div>
+          <h2>Data protection</h2>
+          <p>A legal hold freezes deletion. Deleting company data is permanent.</p>
+        </div>
+      </div>
+
+      <h3 style={{ margin: '0 0 8px' }}>Legal hold</h3>
+      {holdError && <Notice kind="error">{holdError}</Notice>}
+      {settings.legalHold ? (
+        <>
+          <Notice kind="warn">
+            Legal hold is <b>on</b>{settings.legalHoldAt ? <> since {formatDate(settings.legalHoldAt)}</> : null}. Reason: {settings.legalHoldReason || 'not given'}. Retention clean-up and all deletion below are paused.
+          </Notice>
+          <button className="btn secondary" disabled={holdBusy} onClick={() => void setHold(false)}>{holdBusy ? 'Saving…' : 'Lift legal hold'}</button>
+        </>
+      ) : (
+        <>
+          <div className="field">
+            <label htmlFor="lh">Reason</label>
+            <input id="lh" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="For example: audit 2026 or case number" />
+            <small>While on, no backup is deleted by retention, and the delete buttons below are blocked. Every change is written to the activity log.</small>
+          </div>
+          <button className="btn secondary" disabled={holdBusy || reason.trim().length < 2} onClick={() => void setHold(true)}>{holdBusy ? 'Saving…' : 'Switch on legal hold'}</button>
+        </>
+      )}
+
+      <h3 style={{ margin: '28px 0 8px' }}>Delete company data</h3>
+      {delError && <Notice kind="error">{delError}</Notice>}
+      <div className="field">
+        <label htmlFor="dn">Type the company name to confirm: <b>{settings.name}</b></label>
+        <input id="dn" value={confirmName} onChange={(e) => setConfirmName(e.target.value)} autoComplete="off" />
+      </div>
+      <div className="row gap" style={{ marginTop: 0 }}>
+        <button className="btn danger" disabled={!nameOk || settings.legalHold || !!delBusy} onClick={() => void deleteBackups()}>
+          {delBusy === 'backups' ? 'Deleting…' : 'Delete all backups'}
+        </button>
+        <small className="hint-line">Removes every backup and its files. Orgs, people and settings stay.</small>
+      </div>
+      <div className="field" style={{ marginTop: 18 }}>
+        <label htmlFor="dp">Your password (needed to delete the whole company)</label>
+        <input id="dp" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+      </div>
+      <div className="row gap" style={{ marginTop: 0 }}>
+        <button className="btn danger" disabled={!nameOk || !password || settings.legalHold || !!delBusy} onClick={() => void deleteCompany()}>
+          {delBusy === 'company' ? 'Deleting…' : 'Delete the whole company'}
+        </button>
+        <small className="hint-line">Removes backups, org connections, people and settings, and signs everyone out. This cannot be undone.</small>
       </div>
     </section>
   );

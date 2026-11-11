@@ -127,6 +127,44 @@ If **Test with Salesforce** shows "retry your request", the new Connected App is
 - **Partial**: some items failed or were skipped. The reason is shown on each item.
 - **Failed**: nothing usable was saved.
 
+### Incremental backups and big objects
+
+- By default a backup reads from Salesforce **only the records that changed** since the last good backup, and carries the rest over. Each backup is still a **complete, self-contained snapshot**: you can download or browse it without needing the earlier ones.
+- Deleted records are found with Salesforce's `IsDeleted` flag. The watermark is taken 120 seconds back, so records changed during the previous backup are not missed.
+- Every backup is checked against Salesforce's row count. If the counts do not match, the object is read again in full, so a wrong snapshot is never reported as good.
+- To read everything again, tick **Read everything again (full copy)** when you start a backup. A full copy is also forced once the last one is older than `FULL_REFRESH_DAYS` (default 7).
+- Objects with at least `BULK_THRESHOLD_ROWS` rows (default 50,000) are read with the **Bulk API 2.0**. Smaller ones use the REST API.
+- The run page shows whether it was incremental or a full copy, and for each object how many records changed and were deleted.
+
+### Data explorer
+
+**Data explorer** (in the menu) lets you look inside a finished backup without downloading it: pick an org, a backup and an object, then page through and search the records. **Download CSV** exports the object (not available to Auditors). The Browse records button on a run page opens the same view.
+
+### The job queue and the worker
+
+- Backups are queued in the database (PostgreSQL), so they survive a restart. If the server stops mid-backup, another worker picks the run up after its lease runs out, and the run page shows the attempt number. A backup is tried at most 3 times.
+- Each org can have **one running and one waiting** backup. A third request is refused with a clear message.
+- By default the web server also runs the backups (`WORKER_MODE=embedded`). For more customers, set `WORKER_MODE=external` on the web server and run `npm run worker` as a separate process (it can run on another machine with the same `DATABASE_URL` and storage). `WORKER_CONCURRENCY` (default 2) is how many backups one worker runs at once.
+
+### Accounts and data protection
+
+- **Email confirmation at sign-up.** When email is set up, a new company owner must open the emailed link (works once, 24 hours) before signing in. They can ask for a new link once a minute. The first account (platform admin) and invited people skip this. Without email set up, sign-up works as before.
+- **Auditor role.** An Auditor can see everything, including the data explorer, but cannot download files, export CSV, start backups or change settings. Use it for people who must look but not take data out.
+- **Reset email for a team member.** Owners can press **Send reset email** next to a person in Settings → Team. The person gets the normal one-hour reset link. It needs email to be set up.
+- **Legal hold** (owner only, Settings → Data protection). While it is on, nothing is deleted: retention, **Delete all backups** and **Delete the whole company** are all blocked. Turn it off to allow deletion again. The reason and time are recorded.
+- **Delete all backups** removes every stored backup but keeps the company and connected orgs. You must type the company name.
+- **Delete the whole company** removes the company, its people, orgs, settings and every stored backup, and cannot be undone. You must type the company name and your password. Because the company's own activity log is deleted with it, a short platform-level record is kept (company name and who did it).
+
+### Environment variables for these features
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STORAGE_DRIVER` | `local` | Where backup files are kept. Only the server's disk (`STORAGE_DIR`) is built. |
+| `WORKER_MODE` | `embedded` | `embedded` or `external` (see the job queue above). |
+| `WORKER_CONCURRENCY` | `2` | Backups one worker runs at once (1 to 16). |
+| `BULK_THRESHOLD_ROWS` | `50000` | Use the Bulk API 2.0 from this many rows. |
+| `FULL_REFRESH_DAYS` | `7` | Force a full copy when the last one is older than this. `0` turns off incremental reuse. |
+
 ## 5. Customers' orgs (hosted use)
 
 The one shared Connected App must be usable in each customer org. Salesforce may require the customer's admin to allow it: **Setup → Connected Apps OAuth Usage** (or install it). If login says the app is blocked, this is why. For wide public use, Salesforce may also want a managed package or a reviewed Connected App. Check Salesforce's current rules before you launch.
@@ -141,17 +179,18 @@ The one shared Connected App must be usable in each customer org. Salesforce may
 
 ## 7. Checks that were done
 
-- Backend: 69 automated tests pass (login, encryption, connect flow, backup, honest status, settings, team invites, retention, dashboard, email settings, failure alerts, invitation email, password reset). They use a **fake Salesforce** and a **fake mail server**.
-- Email: the screens were opened in a browser and the error messages checked against a mail server that refuses connections. **No real email has been sent yet.** Please press **Send a test email** with your provider's details.
+- Backend: 101 automated tests pass (login, encryption, connect flow, backup, honest status, settings, team invites, retention, dashboard, email settings, failure alerts, invitation email, password reset, job queue and restart recovery, incremental and Bulk API copies, data explorer, email confirmation, Auditor role, legal hold and deletion). They use a **fake Salesforce** and a **fake mail server**.
+- Email: a real test email was received with the owner's SMTP details, and the owner confirmed email works. Sign-up confirmation and the reset-for-a-team-member email use the same mail code and are covered by tests with the fake mail server.
+- Not run against a real org yet: **incremental copies and the Bulk API 2.0** (tested with the fake Salesforce only), and the new owner-only screens (Data protection, Send reset email) were checked by tests, not clicked through in a browser with an owner account.
 - Frontend: type check and build pass. Screens were opened in a browser, including phone width.
 - Against real Salesforce: the app was tested only with a fake Client ID. Salesforce answered that it does not recognise it, and the app showed a clear message. **A full backup of a real org has not been run yet.** It needs your Connected App. Please run a first backup on your Developer org and read the run details.
 
 ## 8. Known limits (not hidden)
 
 - **Not in this version:** file and attachment contents, and restore into Salesforce.
-- Records are exported with the REST API. Very large objects (millions of rows) will be slow. Bulk API 2.0 is the next step for scale.
+- Records use the REST API below `BULK_THRESHOLD_ROWS` and the Bulk API 2.0 above it. The Bulk path has only been tested against a fake Salesforce so far.
 - Some data is not copied, and each is listed with its reason: managed-package metadata, binary and compound fields, and some system objects. See **What a backup covers** on the org page.
-- Backups run inside the app server process. For many customers, move them to a separate worker later.
-- Storage is the server's disk. Object storage (S3 or similar) is a later step.
-- Email covers failure alerts, invitations and password reset. An owner cannot start a reset for a team member (the person asks for it on the sign-in page). An alert is not retried if the mail server is down at that moment (the failure is shown in the alert list).
-- Roles: Owner can do everything, including settings and team. Admin can connect, back up, schedule and delete orgs. Viewer can only look and download.
+- An incremental backup is a rebuilt full snapshot: it still stores a full copy of each object on disk every time, so storage use is the same as full copies. It saves Salesforce API calls and time, not disk space.
+- Storage is the server's disk (`STORAGE_DIR`). The code is split so object storage (S3 or similar) can be added, but it is not built yet.
+- The queue lives in PostgreSQL and the worker can run separately, but there is one database and no automatic scaling.- Email covers failure alerts, invitations, password reset and sign-up confirmation. An alert is not retried if the mail server is down at that moment (the failure is shown in the alert list). If the confirmation email cannot be sent, the account is still created and the person can ask for the link again.
+- Roles: **Owner** can do everything, including settings, team, legal hold and deletion. **Admin** can connect, back up, schedule and delete orgs. **Viewer** can look, browse the data explorer and download. **Auditor** can look and browse but cannot download, export or change anything.

@@ -5,7 +5,8 @@ interface AuthValue {
   user: User | null;
   loading: boolean;
   login(email: string, password: string): Promise<void>;
-  register(input: { workspaceName: string; name: string; email: string; password: string }): Promise<void>;
+  /** Resolves to 'verify' when the person must first open the link we emailed (no sign-in yet). */
+  register(input: { workspaceName: string; name: string; email: string; password: string }): Promise<'signed-in' | 'verify'>;
   logout(): Promise<void>;
   acceptInvite(input: { token: string; name: string; password: string }): Promise<void>;
   /** Update what we know about the signed-in user's company after Settings are saved. */
@@ -34,8 +35,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(r.user);
   }, []);
   const register = useCallback(async (input: { workspaceName: string; name: string; email: string; password: string }) => {
-    const r = await api<{ user: User }>('/auth/register', { method: 'POST', body: input });
+    const r = await api<{ user?: User; verificationRequired?: boolean }>('/auth/register', { method: 'POST', body: input });
+    if (r.verificationRequired || !r.user) return 'verify' as const;
     setUser(r.user);
+    return 'signed-in' as const;
   }, []);
   const acceptInvite = useCallback(async (input: { token: string; name: string; password: string }) => {
     const r = await api<{ user: User }>('/auth/accept-invite', { method: 'POST', body: input });
@@ -60,3 +63,5 @@ export function useAuth() {
 }
 
 export const canManage = (u: User | null) => !!u && (u.role === 'OWNER' || u.role === 'ADMIN');
+/** Auditors may look at everything but cannot take data out (downloads, CSV). */
+export const canExport = (u: User | null) => !!u && u.role !== 'AUDITOR';

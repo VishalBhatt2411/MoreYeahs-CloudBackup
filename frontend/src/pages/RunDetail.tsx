@@ -1,11 +1,14 @@
 import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, errText, formatBytes, formatDate, type RunDetail as RunDetailT } from '../api';
+import { canExport, useAuth } from '../auth';
 import { Notice, PageHead, StatusPill, useLoad } from '../ui';
 import { isActiveRun } from './Runs';
 
 export default function RunDetail() {
   const { id } = useParams();
+  const { user } = useAuth();
+  const exportOk = canExport(user);
   const [dlError, setDlError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'problems'>('all');
   const res = useLoad(() => api<{ run: RunDetailT }>(`/runs/${id}`), [id], { active: (d) => isActiveRun(d.run) });
@@ -33,11 +36,12 @@ export default function RunDetail() {
       <PageHead
         eyebrow="BACKUP RUN"
         title={run.orgLabel ?? 'Backup run'}
-        subtitle={<><StatusPill status={run.status} /> {run.orgUsername} · started {formatDate(run.startedAt ?? run.createdAt)}{run.finishedAt ? ` · finished ${formatDate(run.finishedAt)}` : ''}</>}
+        subtitle={<><StatusPill status={run.status} /> {run.orgUsername} · started {formatDate(run.startedAt ?? run.createdAt)}{run.finishedAt ? ` · finished ${formatDate(run.finishedAt)}` : ''} · {run.mode === 'INCREMENTAL' ? 'incremental' : 'full copy'}{run.attempts && run.attempts > 1 ? ` · attempt ${run.attempts}` : ''}</>}
         actions={
           <>
             <Link className="btn secondary" to={`/orgs/${run.connectionId}`}>Open org</Link>
-            <button className="btn primary" disabled={!hasFiles || isActiveRun(run)} onClick={() => void download()}>Download everything (.zip)</button>
+            <Link className="btn secondary" to={`/explorer?org=${run.connectionId}&run=${run.id}`}>Browse records</Link>
+            {exportOk && <button className="btn primary" disabled={!hasFiles || isActiveRun(run)} onClick={() => void download()}>Download everything (.zip)</button>}
           </>
         }
       />
@@ -78,6 +82,9 @@ export default function RunDetail() {
                     <strong>{i.name}</strong>
                     {i.error && <div className="err">{i.error}</div>}
                     {i.note && <div className="hint">{i.note}</div>}
+                    {i.mode === 'INCREMENTAL' && (
+                      <div className="hint">Incremental: {(i.changedCount ?? 0).toLocaleString()} changed, {(i.deletedCount ?? 0).toLocaleString()} deleted since the last backup</div>
+                    )}
                   </td>
                   <td>{i.kind === 'OBJECT' ? 'Records' : 'Metadata'}</td>
                   <td><StatusPill status={i.status} /></td>
@@ -85,7 +92,7 @@ export default function RunDetail() {
                   <td>{i.rowCount ?? '-'}</td>
                   <td>{formatBytes(i.bytes)}</td>
                   <td className="mono">{i.sha256 ? `${i.sha256.slice(0, 12)}…` : '-'}</td>
-                  <td>{i.downloadable && <button className="link" onClick={() => void download(i.id)}>Download</button>}</td>
+                  <td>{i.downloadable && exportOk && <button className="link" onClick={() => void download(i.id)}>Download</button>}</td>
                 </tr>
               ))}
             </tbody>

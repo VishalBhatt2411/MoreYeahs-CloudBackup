@@ -16,6 +16,7 @@ export default defineConfig({
       TOKEN_ENCRYPTION_KEY: '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff',
       STORAGE_DIR: './.test-storage',
       BCRYPT_COST: '4',
+      BULK_THRESHOLD_ROWS: '1000',
       SF_LOGIN_URL_PRODUCTION: 'http://localhost:54399',
       SF_LOGIN_URL_SANDBOX: 'http://localhost:54399',
     },

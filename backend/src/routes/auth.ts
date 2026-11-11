@@ -61,26 +61,118 @@ authRouter.post(
     const exists = await prisma.user.findUnique({ where: { email: body.email } });
     if (exists) throw new HttpError(409, 'An account with this email already exists. Try signing in.');
     const passwordHash = await bcrypt.hash(body.password, config.bcryptCost);
+    // Customers must prove they own the email, but only once the platform can actually send mail
+    // (otherwise nobody could ever finish signing up). The very first account (the platform admin)
+    // is exempt: it is the person who sets mail up in the first place.
+    const mailReady = await isEmailConfigured();
     // The very first account on a fresh install becomes the platform admin (it can save the
     // Salesforce Connected App details). Every later account is a normal customer.
     // A database lock makes sure two sign-ups at the same moment cannot both become admin.
     const tenant = await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(727001)`;
       const adminExists = (await tx.user.count({ where: { isPlatformAdmin: true } })) > 0;
+      const needsVerification = mailReady && adminExists;
       return tx.tenant.create({
         data: {
           name: body.workspaceName,
           users: {
-            create: { email: body.email, name: body.name, passwordHash, role: 'OWNER', isPlatformAdmin: !adminExists },
+            create: {
+              email: body.email,
+              name: body.name,
+              passwordHash,
+              role: 'OWNER',
+              isPlatformAdmin: !adminExists,
+              emailVerifiedAt: needsVerification ? null : new Date(),
+            },
           },
         },
         include: { users: true },
       });
     });
     const user = tenant.users[0]!;
-    setSessionCookie(res, user.id);
     await audit(tenant.id, user.id, 'auth.register', user.email);
+    if (!user.emailVerifiedAt) {
+      try {
+        await sendVerificationEmail(user);
+      } catch (e) {
+        console.error('Verification email failed:', explainMailError(e));
+      }
+      // No login yet: the person must open the link in the email first.
+      res.status(201).json({ verificationRequired: true, email: user.email });
+      return;
+    }
+    setSessionCookie(res, user.id);
     res.status(201).json({ user: publicUser(user, tenant) });
+  }),
+);
+
+// ---- Email verification ----------------------------------------------------------------------
+
+export const VERIFY_HOURS = 24;
+const VERIFY_COOLDOWN_MS = 60 * 1000;
+
+// Each request can send an email, so this is stricter than the general limiter.
+const verifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: config.isTest ? 1000 : 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attempts. Please wait a few minutes and try again.' },
+});
+
+async function sendVerificationEmail(user: { id: string; email: string; name: string; tenantId: string }) {
+  const token = randomBytes(32).toString('hex');
+  await prisma.emailVerification.create({
+    data: { userId: user.id, tokenHash: hashInviteToken(token), expiresAt: new Date(Date.now() + VERIFY_HOURS * 3600 * 1000) },
+  });
+  const mail = renderEmail({
+    heading: 'Confirm your email',
+    lines: [
+      `Hi ${user.name}, welcome to CloudBackup. Please confirm that this is your email address.`,
+      `This link works once and for ${VERIFY_HOURS} hours.`,
+    ],
+    button: { label: 'Confirm my email', url: `${config.appUrl}/verify/${token}` },
+  });
+  await sendMail({ to: user.email, subject: 'Confirm your CloudBackup email', text: mail.text, html: mail.html });
+  await audit(user.tenantId, user.id, 'auth.verify.sent', user.email);
+}
+
+authRouter.post(
+  '/verify-email',
+  limiter,
+  wrap(async (req, res) => {
+    const body = z.object({ token: z.string().min(10) }).parse(req.body);
+    const row = await prisma.emailVerification.findUnique({ where: { tokenHash: hashInviteToken(body.token) }, include: { user: true } });
+    if (!row || row.usedAt || row.expiresAt < new Date()) {
+      throw new HttpError(404, 'This confirmation link is not valid any more. Ask for a new one on the sign-in page.', 'verify_invalid');
+    }
+    const now = new Date();
+    await prisma.$transaction(async (tx) => {
+      const used = await tx.emailVerification.updateMany({ where: { id: row.id, usedAt: null }, data: { usedAt: now } });
+      if (used.count !== 1) throw new HttpError(404, 'This confirmation link was already used.', 'verify_invalid');
+      await tx.user.update({ where: { id: row.userId }, data: { emailVerifiedAt: row.user.emailVerifiedAt ?? now } });
+    });
+    await audit(row.user.tenantId, row.userId, 'auth.verified', row.user.email);
+    // Deliberately does not sign anyone in: the link alone must not be enough to get a session.
+    res.json({ ok: true });
+  }),
+);
+
+// Same answer whether or not the address has an unverified account.
+authRouter.post(
+  '/resend-verification',
+  verifyLimiter,
+  wrap(async (req, res) => {
+    const body = z.object({ email: z.string().trim().toLowerCase().email('Enter a valid email') }).parse(req.body);
+    if (!(await isEmailConfigured())) {
+      throw new HttpError(409, 'Email is not set up on this platform, so a confirmation cannot be sent.', 'email_not_configured');
+    }
+    const user = await prisma.user.findUnique({ where: { email: body.email } });
+    if (user && user.active && !user.emailVerifiedAt) {
+      const recent = await prisma.emailVerification.count({ where: { userId: user.id, createdAt: { gt: new Date(Date.now() - VERIFY_COOLDOWN_MS) } } });
+      if (recent === 0) void sendVerificationEmail(user).catch((e) => console.error('Verification email failed:', explainMailError(e)));
+    }
+    res.json({ ok: true });
   }),
 );
 
@@ -96,6 +188,10 @@ authRouter.post(
     const ok = await bcrypt.compare(body.password, user ? user.passwordHash : dummyHash());
     if (!user || !ok) throw new HttpError(401, 'Wrong email or password.');
     if (!user.active) throw new HttpError(403, 'This account has been switched off. Ask your company owner.', 'account_disabled');
+    // Only said after the password is right, so it reveals nothing to someone guessing emails.
+    if (!user.emailVerifiedAt) {
+      throw new HttpError(403, 'Please confirm your email first. Open the link we sent you, or ask for a new one below.', 'email_not_verified');
+    }
     await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
     setSessionCookie(res, user.id, user.tenant.sessionHours);
     await audit(user.tenantId, user.id, 'auth.login', user.email);
@@ -154,7 +250,8 @@ authRouter.post(
       const used = await tx.invite.updateMany({ where: { id: invite.id, acceptedAt: null }, data: { acceptedAt: new Date() } });
       if (used.count !== 1) throw new HttpError(404, 'This invitation was already used.', 'invite_invalid');
       return tx.user.create({
-        data: { email: invite.email, name: body.name, passwordHash, role: invite.role, tenantId: invite.tenantId, lastLoginAt: new Date() },
+        // Opening the emailed invitation already proves the person owns that address.
+        data: { email: invite.email, name: body.name, passwordHash, role: invite.role, tenantId: invite.tenantId, lastLoginAt: new Date(), emailVerifiedAt: new Date() },
       });
     });
     setSessionCookie(res, user.id, invite.tenant.sessionHours);
@@ -177,7 +274,7 @@ const resetLimiter = rateLimit({
   message: { error: 'Too many attempts. Please wait a few minutes and try again.' },
 });
 
-async function sendResetEmail(user: { id: string; email: string; name: string; tenantId: string }) {
+export async function sendResetEmail(user: { id: string; email: string; name: string; tenantId: string }) {
   const token = randomBytes(32).toString('hex');
   await prisma.passwordReset.create({
     data: { userId: user.id, tokenHash: hashInviteToken(token), expiresAt: new Date(Date.now() + RESET_MINUTES * 60 * 1000) },
@@ -250,7 +347,8 @@ authRouter.post(
       if (used.count !== 1) throw new HttpError(404, 'This reset link was already used.', 'reset_invalid');
       // Any other open links for this person die too, and every existing login stops working.
       await tx.passwordReset.updateMany({ where: { userId: reset.userId, usedAt: null }, data: { usedAt: now } });
-      await tx.user.update({ where: { id: reset.userId }, data: { passwordHash, passwordChangedAt: now } });
+      // The link was delivered to their mailbox, which also proves they own the address.
+      await tx.user.update({ where: { id: reset.userId }, data: { passwordHash, passwordChangedAt: now, emailVerifiedAt: reset.user.emailVerifiedAt ?? now } });
     });
     clearSessionCookie(res);
     await audit(reset.user.tenantId, reset.userId, 'auth.password.reset', reset.user.email);
