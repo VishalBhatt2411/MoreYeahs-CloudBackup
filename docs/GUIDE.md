@@ -44,14 +44,17 @@ Open http://localhost:5173
 
 ## 2. Make yourself the platform admin
 
-1. Open http://localhost:5173/register and create your account.
-2. In a terminal run the command below. It asks for the email and **you type the password** (never share it in chat):
+**The first account ever created on a fresh install is the platform admin automatically.** Open http://localhost:5173/register and create your account. You will see **Salesforce integration** in the menu. Every account after that is a normal customer.
+
+**When you host it for real: register your own account first, right after you deploy, before anyone else can reach the site.**
+
+Fallback: if another account is already the admin, or you need to promote someone, run the command below. It asks for the email and **you type the password** (never share it in chat):
 
 ```bash
 npm run create-admin
 ```
 
-If your account already exists, use the same email. Sign out and sign in again. You will now see **Salesforce integration** in the menu.
+Then sign out and sign in again.
 
 ## 3. Create the Connected App in Salesforce (about 5 minutes)
 

@@ -59,12 +59,21 @@ authRouter.post(
     const exists = await prisma.user.findUnique({ where: { email: body.email } });
     if (exists) throw new HttpError(409, 'An account with this email already exists. Try signing in.');
     const passwordHash = await bcrypt.hash(body.password, config.bcryptCost);
-    const tenant = await prisma.tenant.create({
-      data: {
-        name: body.workspaceName,
-        users: { create: { email: body.email, name: body.name, passwordHash, role: 'OWNER' } },
-      },
-      include: { users: true },
+    // The very first account on a fresh install becomes the platform admin (it can save the
+    // Salesforce Connected App details). Every later account is a normal customer.
+    // A database lock makes sure two sign-ups at the same moment cannot both become admin.
+    const tenant = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(727001)`;
+      const adminExists = (await tx.user.count({ where: { isPlatformAdmin: true } })) > 0;
+      return tx.tenant.create({
+        data: {
+          name: body.workspaceName,
+          users: {
+            create: { email: body.email, name: body.name, passwordHash, role: 'OWNER', isPlatformAdmin: !adminExists },
+          },
+        },
+        include: { users: true },
+      });
     });
     const user = tenant.users[0]!;
     setSessionCookie(res, user.id);

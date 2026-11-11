@@ -1,9 +1,36 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
-import { app, resetDb, signUp } from './helpers.js';
+import { app, resetDb, resetDbEmpty, signUp } from './helpers.js';
 import { prisma } from '../src/db.js';
 
 beforeAll(resetDb);
+
+describe('first account is the platform admin', () => {
+  it('makes only the very first account the platform admin', async () => {
+    await resetDbEmpty();
+    const first = await signUp('First');
+    const second = await signUp('Second');
+    expect((await first.agent.get('/api/auth/me')).body.user.isPlatformAdmin).toBe(true);
+    expect((await second.agent.get('/api/auth/me')).body.user.isPlatformAdmin).toBe(false);
+    // and the admin can reach the platform screen, the customer cannot
+    expect((await first.agent.get('/api/platform/salesforce')).status).toBe(200);
+    expect((await second.agent.get('/api/platform/salesforce')).status).toBe(403);
+  });
+
+  it('still gives only one admin when two people sign up at the same moment', async () => {
+    await resetDbEmpty();
+    const results = await Promise.all(
+      [1, 2, 3, 4].map((n) =>
+        request(app)
+          .post('/api/auth/register')
+          .send({ workspaceName: `Race ${n} Co`, name: `R${n}`, email: `race${n}-${Date.now()}@example.com`, password: 'a-long-test-password' }),
+      ),
+    );
+    expect(results.every((r) => r.status === 201)).toBe(true);
+    expect(results.filter((r) => r.body.user.isPlatformAdmin).length).toBe(1);
+    await resetDb(); // back to a normal state for the other tests
+  });
+});
 
 describe('sign up and sign in', () => {
   it('creates a workspace and logs the owner in', async () => {

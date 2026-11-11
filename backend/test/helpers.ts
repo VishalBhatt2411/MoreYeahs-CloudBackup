@@ -8,7 +8,8 @@ export const app = createApp();
 export const CLIENT_ID = '3MVG9validclientid1234567890';
 export const CLIENT_SECRET = 'valid-secret-abcdefghij-0123456789';
 
-export async function resetDb() {
+/** Empties every table. The next account to register becomes the platform admin. */
+export async function resetDbEmpty() {
   await prisma.auditLog.deleteMany();
   await prisma.oAuthState.deleteMany();
   await prisma.backupItem.deleteMany();
@@ -17,6 +18,20 @@ export async function resetDb() {
   await prisma.user.deleteMany();
   await prisma.tenant.deleteMany();
   await prisma.salesforceAppConfig.deleteMany();
+}
+
+/**
+ * Empties every table, then adds one platform admin, like a running install.
+ * So accounts made by signUp() are normal customers.
+ */
+export async function resetDb() {
+  await resetDbEmpty();
+  await prisma.tenant.create({
+    data: {
+      name: 'Platform owner',
+      users: { create: { email: 'platform-seed@example.com', name: 'Seed', passwordHash: 'x', role: 'OWNER', isPlatformAdmin: true } },
+    },
+  });
 }
 
 let counter = 0;
