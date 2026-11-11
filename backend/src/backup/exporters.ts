@@ -4,7 +4,6 @@ import { stat, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { createGunzip, createGzip } from 'node:zlib';
-import { createInterface } from 'node:readline';
 import type { SfGateway } from '../salesforce/gateway.js';
 import { SKIPPED_FIELD_TYPES } from './coverage.js';
 import { absPath, ensureDir, safeName } from './storage.js';
@@ -33,10 +32,17 @@ async function sha256OfFile(abs: string): Promise<string> {
   return h.digest('hex');
 }
 
-async function countGzLines(abs: string): Promise<number> {
-  const rl = createInterface({ input: createReadStream(abs).pipe(createGunzip()), crlfDelay: Infinity });
+/**
+ * Counts rows by counting real newline bytes (each row is one line ending in "\n").
+ * Not readline: it also splits on U+2028/U+2029, which JSON.stringify leaves as-is inside
+ * text (e.g. page markup), so it would count extra rows that are not there.
+ */
+export async function countGzLines(abs: string): Promise<number> {
   let n = 0;
-  for await (const line of rl) if (line.length > 0) n++;
+  for await (const chunk of createReadStream(abs).pipe(createGunzip())) {
+    const buf = chunk as Buffer;
+    for (let i = 0; i < buf.length; i++) if (buf[i] === 0x0a) n++;
+  }
   return n;
 }
 
