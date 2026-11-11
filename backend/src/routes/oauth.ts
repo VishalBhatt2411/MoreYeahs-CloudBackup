@@ -133,9 +133,18 @@ oauthRouter.get(
         connectedAt: new Date(),
         lastCheckedAt: new Date(),
       };
+      // A newly connected org gets the company's default backup schedule (Settings screen).
+      const tenant = await prisma.tenant.findUnique({ where: { id: pending.tenantId }, select: { defaultScheduleHours: true } });
+      const hours = tenant?.defaultScheduleHours ?? null;
       const connection = await prisma.orgConnection.upsert({
         where: { tenantId_sfOrgId: { tenantId: pending.tenantId, sfOrgId: identity.organization_id } },
-        create: { tenantId: pending.tenantId, sfOrgId: identity.organization_id, ...data },
+        create: {
+          tenantId: pending.tenantId,
+          sfOrgId: identity.organization_id,
+          ...data,
+          scheduleHours: hours,
+          nextRunAt: hours ? new Date(Date.now() + hours * 3600 * 1000) : null,
+        },
         update: data,
       });
       await audit(pending.tenantId, pending.userId, 'org.connected', `${connection.label} (${identity.organization_id})`);

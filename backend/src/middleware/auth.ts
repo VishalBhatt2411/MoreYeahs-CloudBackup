@@ -6,7 +6,6 @@ import { prisma } from '../db.js';
 import { HttpError } from '../lib/http.js';
 
 export const SESSION_COOKIE = 'cb_session';
-const SESSION_DAYS = 7;
 
 export type AuthedUser = Pick<User, 'id' | 'email' | 'name' | 'role' | 'isPlatformAdmin' | 'tenantId'>;
 
@@ -16,13 +15,14 @@ declare module 'express-serve-static-core' {
   }
 }
 
-export function setSessionCookie(res: Response, userId: string) {
-  const token = jwt.sign({ sub: userId }, config.jwtSecret, { expiresIn: `${SESSION_DAYS}d` });
+/** `hours` is the company's "sign-in lasts" setting (Settings > Security). */
+export function setSessionCookie(res: Response, userId: string, hours = 168) {
+  const token = jwt.sign({ sub: userId }, config.jwtSecret, { expiresIn: `${hours}h` });
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: 'lax',
     secure: config.isProd,
-    maxAge: SESSION_DAYS * 24 * 3600 * 1000,
+    maxAge: hours * 3600 * 1000,
     path: '/',
   });
 }
@@ -40,9 +40,12 @@ export async function loadUser(req: Request): Promise<AuthedUser | null> {
     if (!payload.sub) return null;
     const user = await prisma.user.findUnique({
       where: { id: payload.sub },
-      select: { id: true, email: true, name: true, role: true, isPlatformAdmin: true, tenantId: true },
+      select: { id: true, email: true, name: true, role: true, isPlatformAdmin: true, tenantId: true, active: true },
     });
-    return user;
+    // A switched-off account stops working at once, even with a valid cookie.
+    if (!user || !user.active) return null;
+    const { active: _active, ...rest } = user;
+    return rest;
   } catch {
     return null;
   }

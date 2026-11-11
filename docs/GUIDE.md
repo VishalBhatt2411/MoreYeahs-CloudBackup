@@ -88,6 +88,18 @@ If **Test with Salesforce** shows "retry your request", the new Connected App is
 4. **Download everything (.zip)** or download single files.
 5. Optionally set **Automatic backups** (every 6 h, 12 h, day, week).
 
+### Dashboard and Settings
+
+- **Dashboard** (the home page) shows connected orgs, running backups, stored data, the next scheduled backup, a **Needs attention** list (failed, partial, overdue, never backed up, reconnect needed), the last 30 days by result, and recent backups.
+- **Settings** (owners can change; others can look):
+  - **Time zone**: every date in the app uses it.
+  - **Default schedule**: given to each org you connect later. **Apply to all connected orgs now** sets it on existing orgs.
+  - **Retention**: delete finished backups older than N days (checked every hour). The screen shows how many backups would go before you save. The newest good backup of each org is always kept, and running backups are never touched. Empty means keep forever.
+  - **Alerts**: choices are saved, but **no email is sent yet** (see limits).
+  - **Sign-in length**, **change my password**, and a read-only **role permissions** table.
+  - **Team**: invite people, change roles, switch people off. A switched-off person is signed out at once and cannot sign in.
+- **Inviting someone**: Settings → Team → enter email and role → **Create invite link**. No email is sent, so copy the link and send it yourself. It is shown once, works 7 days, and works once. The person opens it, picks a name and password, and joins your company.
+
 ### What the run status means
 
 - **Succeeded**: every item was copied, re-read, and the checksum matched.
@@ -108,7 +120,7 @@ The one shared Connected App must be usable in each customer org. Salesforce may
 
 ## 7. Checks that were done
 
-- Backend: 35 automated tests pass (login, encryption, connect flow, backup, honest status). They use a **fake Salesforce**.
+- Backend: 54 automated tests pass (login, encryption, connect flow, backup, honest status, settings, team invites, retention, dashboard). They use a **fake Salesforce**.
 - Frontend: type check and build pass. Screens were opened in a browser, including phone width.
 - Against real Salesforce: the app was tested only with a fake Client ID. Salesforce answered that it does not recognise it, and the app showed a clear message. **A full backup of a real org has not been run yet.** It needs your Connected App. Please run a first backup on your Developer org and read the run details.
 
@@ -119,5 +131,5 @@ The one shared Connected App must be usable in each customer org. Salesforce may
 - Some data is not copied, and each is listed with its reason: managed-package metadata, binary and compound fields, and some system objects. See **What a backup covers** on the org page.
 - Backups run inside the app server process. For many customers, move them to a separate worker later.
 - Storage is the server's disk. Object storage (S3 or similar) is a later step.
-- No email sending (password reset, alerts) yet.
-- Roles: Owner and Admin can connect, back up, schedule and delete. Viewer can only look.
+- No email sending yet (password reset, failure alerts, invites). Invites are shared as a link. The alert settings are saved for when email is added.
+- Roles: Owner can do everything, including settings and team. Admin can connect, back up, schedule and delete orgs. Viewer can only look and download.

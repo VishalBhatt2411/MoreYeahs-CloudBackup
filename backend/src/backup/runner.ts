@@ -7,6 +7,7 @@ import { HttpError } from '../lib/http.js';
 import { getGateway, type SfGateway } from '../salesforce/gateway.js';
 import { classifyObjects, type ExcludedObject } from './coverage.js';
 import { exportMetadataType, exportObject, type ItemResult } from './exporters.js';
+import { purgeAllTenants } from './retention.js';
 import { absPath, ensureDir, runRelDir } from './storage.js';
 
 export interface RunOptions {
@@ -241,7 +242,17 @@ export async function recoverStaleRuns() {
 
 /** Checks every minute for orgs whose scheduled backup is due. */
 export function startScheduler() {
+  let lastPurge = 0;
   const tick = async () => {
+    // Once an hour, delete backups older than each company's retention period.
+    if (Date.now() - lastPurge > 3600_000) {
+      lastPurge = Date.now();
+      try {
+        await purgeAllTenants();
+      } catch (e) {
+        console.error('Retention clean-up error:', msg(e));
+      }
+    }
     try {
       const due = await prisma.orgConnection.findMany({
         where: { status: 'ACTIVE', scheduleHours: { not: null }, nextRunAt: { lte: new Date() } },

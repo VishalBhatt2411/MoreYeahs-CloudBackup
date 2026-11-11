@@ -54,6 +54,30 @@ model Tenant {
   connections OrgConnection[]
   runs        BackupRun[]
   audit       AuditLog[]
+  invites     Invite[]
+
+  // Settings screen
+  timeZone             String  @default("UTC")
+  retentionDays        Int? // null = keep backups forever
+  defaultScheduleHours Int? // given to every newly connected org; null = no automatic backups
+  alertOnFailure       Boolean @default(true)
+  alertEmail           String?
+  sessionHours         Int     @default(168) // how long a sign-in lasts
+}
+
+model Invite {
+  id          String    @id @default(cuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email       String
+  role        Role
+  tokenHash   String    @unique
+  invitedById String
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+
+  @@index([tenantId])
 }
 
 model User {
@@ -63,6 +87,7 @@ model User {
   passwordHash    String
   role            Role      @default(OWNER)
   isPlatformAdmin Boolean   @default(false)
+  active          Boolean   @default(true)
   tenantId        String
   tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   createdAt       DateTime  @default(now())

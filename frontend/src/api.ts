@@ -34,7 +34,7 @@ export interface User {
   name: string;
   role: 'OWNER' | 'ADMIN' | 'VIEWER';
   isPlatformAdmin: boolean;
-  tenant: { id: string; name: string };
+  tenant: { id: string; name: string; timeZone: string };
 }
 
 export interface Connection {
@@ -98,6 +98,67 @@ export function formatBytes(n: number | null | undefined) {
   return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${u[i]}`;
 }
 
+// Dates are shown in the company's time zone (Settings). Set by the sign-in state.
+let displayZone: string | undefined;
+export function setDisplayZone(zone: string | undefined) {
+  displayZone = zone;
+}
+export const getDisplayZone = () => displayZone;
+
 export function formatDate(s: string | null | undefined) {
-  return s ? new Date(s).toLocaleString() : '-';
+  if (!s) return '-';
+  try {
+    return new Date(s).toLocaleString(undefined, { timeZone: displayZone });
+  } catch {
+    return new Date(s).toLocaleString();
+  }
+}
+
+export interface Settings {
+  name: string;
+  timeZone: string;
+  retentionDays: number | null;
+  defaultScheduleHours: number | null;
+  alertOnFailure: boolean;
+  alertEmail: string | null;
+  sessionHours: number;
+}
+
+export interface TeamUser {
+  id: string;
+  email: string;
+  name: string;
+  role: User['role'];
+  active: boolean;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+export interface TeamInvite {
+  id: string;
+  email: string;
+  role: User['role'];
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface Dashboard {
+  timeZone: string;
+  retentionDays: number | null;
+  totals: { orgs: number; connected: number; running: number; bytes: number; rows: number };
+  last30Days: Record<'SUCCEEDED' | 'PARTIAL' | 'FAILED' | 'RUNNING' | 'QUEUED', number>;
+  nextScheduled: { connectionId: string; orgLabel: string; at: string } | null;
+  orgs: {
+    id: string;
+    label: string;
+    username: string;
+    environment: 'PRODUCTION' | 'SANDBOX';
+    status: Connection['status'];
+    scheduleHours: number | null;
+    nextRunAt: string | null;
+    lastRun: { id: string; status: string; finishedAt: string | null; createdAt: string } | null;
+    lastGoodAt: string | null;
+  }[];
+  attention: { kind: 'reconnect' | 'failed' | 'partial' | 'overdue' | 'never'; connectionId: string; orgLabel: string; text: string; runId?: string }[];
+  recentRuns: { id: string; status: string; trigger: string; createdAt: string; finishedAt: string | null; orgLabel: string; orgUsername: string }[];
 }

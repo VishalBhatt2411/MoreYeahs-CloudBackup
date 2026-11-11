@@ -2,11 +2,14 @@ import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { useAuth } from './auth';
 import AuditPage from './pages/Audit';
 import AuthPage from './pages/AuthPage';
+import DashboardPage from './pages/Dashboard';
+import Join from './pages/Join';
 import OrgDetail from './pages/OrgDetail';
 import Orgs from './pages/Orgs';
 import PlatformPage from './pages/Platform';
 import RunDetail from './pages/RunDetail';
 import RunsPage from './pages/Runs';
+import SettingsPage from './pages/Settings';
 
 function Layout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
@@ -23,9 +26,12 @@ function Layout({ children }: { children: React.ReactNode }) {
         </div>
         <nav>
           <div className="nav-label">BACKUP</div>
+          <NavLink to="/dashboard">Dashboard</NavLink>
           <NavLink to="/orgs">Organizations</NavLink>
           <NavLink to="/runs">Backup runs</NavLink>
           <NavLink to="/audit">Activity log</NavLink>
+          <div className="nav-label">ACCOUNT</div>
+          <NavLink to="/settings">Settings</NavLink>
           {user.isPlatformAdmin && (
             <>
               <div className="nav-label">PLATFORM</div>
@@ -58,6 +64,7 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<AuthPage mode="login" />} />
         <Route path="/register" element={<AuthPage mode="register" />} />
+        <Route path="/join/:token" element={<Join />} />
         <Route path="*" element={<Navigate to="/login" replace state={{ from: location.pathname + location.search }} />} />
       </Routes>
     );
@@ -65,16 +72,19 @@ export default function App() {
   return (
     <Layout>
       <Routes>
-        <Route path="/" element={<Navigate to="/orgs" replace />} />
-        <Route path="/login" element={<Navigate to="/orgs" replace />} />
-        <Route path="/register" element={<Navigate to="/orgs" replace />} />
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/login" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/register" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/join/:token" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="/orgs" element={<Orgs />} />
         <Route path="/orgs/:id" element={<OrgDetail />} />
         <Route path="/runs" element={<RunsPage />} />
         <Route path="/runs/:id" element={<RunDetail />} />
         <Route path="/audit" element={<AuditPage />} />
         <Route path="/platform" element={user.isPlatformAdmin ? <PlatformPage /> : <Navigate to="/orgs" replace />} />
-        <Route path="*" element={<Navigate to="/orgs" replace />} />
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
     </Layout>
   );

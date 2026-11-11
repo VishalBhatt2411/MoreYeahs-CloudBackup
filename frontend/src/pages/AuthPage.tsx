@@ -24,7 +24,7 @@ export default function AuthPage({ mode }: { mode: 'login' | 'register' }) {
       if (isRegister) await register({ workspaceName, name, email, password });
       else await login(email, password);
       const from = (location.state as { from?: string } | null)?.from;
-      navigate(from && from.startsWith('/') ? from : '/orgs', { replace: true });
+      navigate(from && from.startsWith('/') ? from : '/dashboard', { replace: true });
     } catch (err) {
       setError(errText(err));
     } finally {
