@@ -1,0 +1,22 @@
+{
+  "name": "moreyeahs-cloudbackup",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MoreYeahs CloudBackup - back up Salesforce org metadata and records.",
+  "workspaces": ["backend", "frontend"],
+  "scripts": {
+    "setup": "node scripts/setup-env.mjs",
+    "db:start": "node scripts/dev-db.mjs",
+    "db:migrate": "npm run db:deploy -w backend",
+    "dev": "concurrently -n api,web -c blue,magenta \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "start": "npm run start -w backend",
+    "typecheck": "npm run typecheck -w backend && npm run typecheck -w frontend",
+    "test": "npm run test -w backend",
+    "create-admin": "npm run create-admin -w backend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "embedded-postgres": "18.6.0-beta.19"
+  }
+}

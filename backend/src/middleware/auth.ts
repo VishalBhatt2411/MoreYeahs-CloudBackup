@@ -1,0 +1,95 @@
+import type { NextFunction, Request, Response } from 'express';
+import jwt from 'jsonwebtoken';
+import type { Role, User } from '@prisma/client';
+import { config } from '../config.js';
+import { prisma } from '../db.js';
+import { HttpError } from '../lib/http.js';
+
+export const SESSION_COOKIE = 'cb_session';
+const SESSION_DAYS = 7;
+
+export type AuthedUser = Pick<User, 'id' | 'email' | 'name' | 'role' | 'isPlatformAdmin' | 'tenantId'>;
+
+declare module 'express-serve-static-core' {
+  interface Request {
+    user?: AuthedUser;
+  }
+}
+
+export function setSessionCookie(res: Response, userId: string) {
+  const token = jwt.sign({ sub: userId }, config.jwtSecret, { expiresIn: `${SESSION_DAYS}d` });
+  res.cookie(SESSION_COOKIE, token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: config.isProd,
+    maxAge: SESSION_DAYS * 24 * 3600 * 1000,
+    path: '/',
+  });
+}
+
+export function clearSessionCookie(res: Response) {
+  res.clearCookie(SESSION_COOKIE, { path: '/' });
+}
+
+/** Reads the login cookie and loads the user. Does not fail if there is none. */
+export async function loadUser(req: Request): Promise<AuthedUser | null> {
+  const token = req.cookies?.[SESSION_COOKIE];
+  if (!token) return null;
+  try {
+    const payload = jwt.verify(token, config.jwtSecret) as { sub?: string };
+    if (!payload.sub) return null;
+    const user = await prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { id: true, email: true, name: true, role: true, isPlatformAdmin: true, tenantId: true },
+    });
+    return user;
+  } catch {
+    return null;
+  }
+}
+
+export async function requireAuth(req: Request, _res: Response, next: NextFunction) {
+  try {
+    const user = await loadUser(req);
+    if (!user) throw new HttpError(401, 'Please sign in.', 'unauthenticated');
+    req.user = user;
+    next();
+  } catch (e) {
+    next(e);
+  }
+}
+
+/** Use after requireAuth. Allows only the listed roles. */
+export const requireRole =
+  (...roles: Role[]) =>
+  (req: Request, _res: Response, next: NextFunction) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return next(new HttpError(403, 'Your role does not allow this action.', 'forbidden'));
+    }
+    next();
+  };
+
+export function requirePlatformAdmin(req: Request, _res: Response, next: NextFunction) {
+  if (!req.user?.isPlatformAdmin) {
+    return next(new HttpError(403, 'Only the platform administrator can do this.', 'forbidden'));
+  }
+  next();
+}
+
+/** Blocks cross-site form posts: if a browser sends an Origin header it must be our own site. */
+export function sameOriginOnly(req: Request, _res: Response, next: NextFunction) {
+  const method = req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return next();
+  const origin = req.headers.origin;
+  if (!origin) return next();
+  let allowed = false;
+  try {
+    const o = new URL(origin);
+    const app = new URL(config.appUrl);
+    allowed = o.host === app.host || o.host === req.headers.host;
+  } catch {
+    allowed = false;
+  }
+  if (!allowed) return next(new HttpError(403, 'Request blocked (different origin).', 'bad_origin'));
+  next();
+}

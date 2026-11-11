@@ -1,0 +1,175 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  VIEWER
+}
+
+enum Environment {
+  PRODUCTION
+  SANDBOX
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  NEEDS_RECONNECT
+  DISCONNECTED
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+}
+
+enum ItemKind {
+  METADATA
+  OBJECT
+}
+
+enum ItemStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+  SKIPPED
+}
+
+model Tenant {
+  id          String           @id @default(cuid())
+  name        String
+  createdAt   DateTime         @default(now())
+  users       User[]
+  connections OrgConnection[]
+  runs        BackupRun[]
+  audit       AuditLog[]
+}
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String
+  passwordHash    String
+  role            Role      @default(OWNER)
+  isPlatformAdmin Boolean   @default(false)
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt       DateTime  @default(now())
+  lastLoginAt     DateTime?
+
+  @@index([tenantId])
+}
+
+// One row only (id = "default"). The shared Salesforce Connected App, entered by the platform admin.
+model SalesforceAppConfig {
+  id              String   @id
+  clientId        String
+  clientSecretEnc String
+  updatedAt       DateTime @updatedAt
+  updatedById     String?
+}
+
+// Short-lived record that links the "Connect Salesforce" click to the callback.
+model OAuthState {
+  state            String   @id
+  tenantId         String
+  userId           String
+  environment      Environment
+  label            String
+  codeVerifierEnc  String
+  createdAt        DateTime @default(now())
+  expiresAt        DateTime
+
+  @@index([expiresAt])
+}
+
+model OrgConnection {
+  id              String           @id @default(cuid())
+  tenantId        String
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  label           String
+  environment     Environment
+  loginUrl        String
+  instanceUrl     String
+  sfOrgId         String
+  sfUserId        String
+  username        String
+  orgName         String?
+  refreshTokenEnc String
+  status          ConnectionStatus @default(ACTIVE)
+  lastError       String?
+  connectedAt     DateTime         @default(now())
+  lastCheckedAt   DateTime?
+  scheduleHours   Int?
+  nextRunAt       DateTime?
+  runs            BackupRun[]
+
+  @@unique([tenantId, sfOrgId])
+  @@index([tenantId])
+}
+
+model BackupRun {
+  id           String        @id @default(cuid())
+  tenantId     String
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  connectionId String
+  connection   OrgConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  status       RunStatus     @default(QUEUED)
+  trigger      String        @default("manual")
+  options      Json?
+  startedById  String?
+  createdAt    DateTime      @default(now())
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  message      String?
+  items        BackupItem[]
+
+  @@index([tenantId, createdAt])
+  @@index([connectionId])
+}
+
+model BackupItem {
+  id            String     @id @default(cuid())
+  runId         String
+  run           BackupRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  tenantId      String
+  kind          ItemKind
+  name          String
+  status        ItemStatus @default(PENDING)
+  expectedCount Int?
+  rowCount      Int?
+  bytes         Int?
+  sha256        String?
+  filePath      String?
+  note          String?
+  error         String?
+  createdAt     DateTime   @default(now())
+  finishedAt    DateTime?
+
+  @@index([runId])
+  @@index([tenantId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  tenantId  String?
+  tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId    String?
+  action    String
+  target    String?
+  detail    String?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}
