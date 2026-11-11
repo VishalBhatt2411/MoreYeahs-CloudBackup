@@ -277,6 +277,12 @@ function EmailPanel() {
         <input type="checkbox" checked={secure} onChange={(e) => setSecure(e.target.checked)} />
         Secure connection from the start (use this with port 465)
       </label>
+      {secure && (port === '587' || port === '25') && (
+        <Notice kind="error">Port {port} needs this box <b>off</b>. With it on, the connection hangs and the test times out. Untick it, or use port 465.</Notice>
+      )}
+      {!secure && port === '465' && (
+        <Notice kind="error">Port 465 needs this box <b>on</b>. Tick it, or use port 587.</Notice>
+      )}
       <div className="field">
         <label htmlFor="mu">User name</label>
         <input id="mu" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" spellCheck={false} />
