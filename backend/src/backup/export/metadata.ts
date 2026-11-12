@@ -337,7 +337,10 @@ export function convertMetadataZip(
 
   // First pass: find source files, so a class's overview row can show its length.
   const sources = new Map<string, NonNullable<Ctx['src']>>();
-  const names = Object.keys(files).filter((n) => !n.endsWith('/') && n !== 'package.xml');
+  // Alphabetical, so every sheet reads in a predictable order (Salesforce returns files in no particular order).
+  const names = Object.keys(files)
+    .filter((n) => !n.endsWith('/') && n !== 'package.xml')
+    .sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base', numeric: true }));
   for (const n of names) {
     const [folder, ...rest] = n.split('/');
     if (!SOURCE_FOLDERS.has(folder) || rest.length === 0 || n.endsWith('-meta.xml')) continue;
