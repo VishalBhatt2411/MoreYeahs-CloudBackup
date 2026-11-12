@@ -67,6 +67,13 @@ function stampMs(row: Record<string, unknown>): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
+/** Salesforce rejects GET addresses much beyond 8 KB with "431 Request Header Fields Too Large". Stay well under. */
+const MAX_QUERY_URL_CHARS = 4500;
+export function soqlTooLongForUrl(soql: string): boolean {
+  // Leave room for the incremental "WHERE SystemModstamp >= ..." clause.
+  return encodeURIComponent(soql).length + 120 > MAX_QUERY_URL_CHARS;
+}
+
 /** Rows are written with Id first, so the id can be read without parsing the whole line. */
 function idOfLine(line: string): string | null {
   if (line.startsWith('{"Id":"')) {
@@ -210,7 +217,7 @@ export async function exportObject(gw: SfGateway, objectName: string, ctx: Expor
 
   // ---- Incremental: copy only what changed, merge it into the last good copy. ----
   if (ctx.wantIncremental) {
-    let reason = await incrementalBlocker(ctx, names, hasStamp).catch((e) => `the previous copy could not be read (${msg(e)})`);
+    let reason = (soqlTooLongForUrl(soql) ? 'the object has too many fields for an incremental query' : null) ?? await incrementalBlocker(ctx, names, hasStamp).catch((e) => `the previous copy could not be read (${msg(e)})`);
     if (!reason) {
       const r = await tryIncremental(gw, objectName, ctx, names, soql, relFile, hasIsDeleted, notes);
       if ('result' in r) return r.result;
@@ -221,15 +228,25 @@ export async function exportObject(gw: SfGateway, objectName: string, ctx: Expor
 
   // ---- Full copy. Large objects go through Bulk API 2.0, the rest through the standard API. ----
   const count = await gw.countRows(objectName).catch(() => null);
-  let useBulk = count !== null && count >= config.bulkThresholdRows;
+  // A query for an object with hundreds of fields is too long for a GET address (Salesforce answers
+  // 431), so those go through Bulk API 2.0, which takes the query in the request body.
+  const wide = soqlTooLongForUrl(soql);
+  const useBulk = wide || (count !== null && count >= config.bulkThresholdRows);
   let written: Written;
   if (useBulk) {
+    let bulkOk = false;
     try {
       written = await writeFull(gw, relFile, soql, true, count, fieldTypes);
-      notes.push(`Copied with Bulk API 2.0 (${count} rows).`);
+      notes.push(`Copied with Bulk API 2.0 (${written.rowCount} rows${wide ? '; the object has too many fields for the standard API' : ''}).`);
+      bulkOk = true;
     } catch (e) {
+      if (wide) throw e;
       notes.push(`Bulk API 2.0 failed (${msg(e).slice(0, 200)}); copied with the standard API instead.`);
-      useBulk = false;
+      written = await writeFull(gw, relFile, soql, false, count, fieldTypes);
+    }
+    // Never settle for a short Bulk copy when the standard API can still do the job.
+    if (bulkOk && !wide && count !== null && written.rowCount !== count) {
+      notes.push(`Bulk API 2.0 returned ${written.rowCount} of ${count} rows; copied again with the standard API.`);
       written = await writeFull(gw, relFile, soql, false, count, fieldTypes);
     }
   } else {
@@ -313,6 +330,45 @@ async function tryIncremental(
 
 const CHUNK = 400;
 
+/** Types Salesforce hands back one file per bundle member, named "Type/Bundle/file". */
+const FILE_PER_MEMBER_TYPES = new Set(['LightningComponentBundle', 'AuraDefinitionBundle', 'ExperienceBundle', 'DigitalExperienceBundle', 'WaveTemplateBundle']);
+
+/**
+ * Did this requested component come back? Salesforce does not always name it the way we asked:
+ *  - Settings come back as "<Name>Settings/<Name>" (AccountSettings/Account);
+ *  - bundles (Lightning web components...) come back as one entry per file;
+ *  - folders come back under the base type (Report/MyFolder), not ReportFolder/MyFolder.
+ */
+export function wasRetrieved(m: { type: string; fullName: string }, got: Set<string>, baseType: string): boolean {
+  const key = `${m.type}/${m.fullName}`;
+  if (got.has(key)) return true;
+  if (m.type === 'Settings' && got.has(`${m.fullName}Settings/${m.fullName}`)) return true;
+  if (FILE_PER_MEMBER_TYPES.has(m.type)) {
+    const prefix = `${m.type}/${m.fullName}/`;
+    for (const g of got) if (g.startsWith(prefix)) return true;
+  }
+  if (m.type !== baseType && got.has(`${baseType}/${m.fullName}`)) return true;
+  return false;
+}
+
+/**
+ * Things Salesforce lists but will not hand over by name. Only applied to components that really
+ * did not come back, and always recorded in the item note, so nothing is hidden.
+ */
+export function unretrievableReason(m: { type: string; fullName: string }, warnings: string[]): string | null {
+  if (m.type === 'InstalledPackage') return 'installed package entries cannot be retrieved (the package itself is not org setup)';
+  if (m.fullName === 'unfiled$public') return 'built-in public folder that Salesforce does not return';
+  if (m.type === 'Layout' && /^[A-Za-z0-9]+__/.test(m.fullName)) return 'page layout of an object that belongs to an installed package';
+  if (warnings.some((w) => w.includes(`Not a registered filter type: ${m.fullName}`))) return 'Salesforce says this is not a retrievable object';
+  return null;
+}
+
+/** Salesforce itself refuses to list a few types in some orgs (for example ContentWorkspace). */
+function listingUnsupported(err: unknown): boolean {
+  const text = err instanceof Error ? err.message : String(err);
+  return /INVALID_FIELD/.test(text) && /ManageableState/i.test(text);
+}
+
 /**
  * Copies one type of metadata (e.g. all Apex classes) as zip files straight from the
  * Salesforce Metadata API, then checks that every component we asked for came back.
@@ -324,7 +380,13 @@ export async function exportMetadataType(
   inFolder: boolean,
   runRelDir: string,
 ): Promise<ItemResult> {
-  const all = await gw.listMetadata(type, inFolder);
+  let all: Awaited<ReturnType<SfGateway['listMetadata']>>;
+  try {
+    all = await gw.listMetadata(type, inFolder);
+  } catch (e) {
+    if (!listingUnsupported(e)) throw e;
+    return { status: 'SUCCEEDED', rowCount: 0, expectedCount: 0, files: [], note: 'Salesforce cannot list this type in this org (it rejects its own listing query), so nothing could be copied.' };
+  }
   const retrievable = all.filter((m) => m.manageableState !== 'installed');
   const installedCount = all.length - retrievable.length;
   const baseNote = installedCount ? `${installedCount} components from installed managed packages are not copied (Salesforce does not allow it).` : undefined;
@@ -337,16 +399,23 @@ export async function exportMetadataType(
   const files: FileEntry[] = [];
   const missing: string[] = [];
   const warnings: string[] = [];
+  const skipped: string[] = [];
   let found = 0;
 
   for (let i = 0; i < retrievable.length; i += CHUNK) {
     const chunk = retrievable.slice(i, i + CHUNK);
     const request: Record<string, string[]> = {};
-    for (const m of chunk) (request[m.type] ??= []).push(m.fullName);
+    // Folders must be asked for as members of the base type (Report: [folder]), not as ReportFolder.
+    for (const m of chunk) (request[inFolder ? type : m.type] ??= []).push(m.fullName);
     const result = await gw.retrieveMetadata(request);
     const got = new Set(result.found);
     for (const m of chunk) {
-      if (got.has(`${m.type}/${m.fullName}`)) found++;
+      if (wasRetrieved(m, got, type)) {
+        found++;
+        continue;
+      }
+      const why = unretrievableReason(m, result.warnings);
+      if (why) skipped.push(`${m.type}/${m.fullName} (${why})`);
       else missing.push(`${m.type}/${m.fullName}`);
     }
     warnings.push(...result.warnings);
@@ -362,9 +431,13 @@ export async function exportMetadataType(
 
   const combined = createHash('sha256').update(files.map((f) => f.sha256).join('')).digest('hex');
   const bytes = files.reduce((s, f) => s + f.bytes, 0);
-  const noteParts = [baseNote, warnings.length ? `Salesforce messages: ${warnings.slice(0, 3).join(' ; ')}` : undefined].filter(Boolean);
+  const skippedNote = skipped.length
+    ? `${skipped.length} not copied because Salesforce does not return them: ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', ...' : ''}.`
+    : undefined;
+  const noteParts = [baseNote, skippedNote, warnings.length ? `Salesforce messages: ${warnings.slice(0, 3).join(' ; ')}` : undefined].filter(Boolean);
+  const expectedTotal = retrievable.length - skipped.length;
   const base = {
-    expectedCount: retrievable.length,
+    expectedCount: expectedTotal,
     rowCount: found,
     bytes,
     sha256: combined,
@@ -373,7 +446,7 @@ export async function exportMetadataType(
     note: noteParts.join(' | ') || undefined,
   };
   if (missing.length > 0) {
-    return { status: 'PARTIAL', ...base, error: `${missing.length} of ${retrievable.length} components did not come back (for example ${missing.slice(0, 3).join(', ')}).` };
+    return { status: 'PARTIAL', ...base, error: `${missing.length} of ${expectedTotal} components did not come back (for example ${missing.slice(0, 3).join(', ')}).` };
   }
   return { status: 'SUCCEEDED', ...base };
 }

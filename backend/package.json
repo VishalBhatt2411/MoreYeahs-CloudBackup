@@ -21,6 +21,7 @@
     "archiver": "^7.0.1",
     "bcryptjs": "^3.0.2",
     "cookie-parser": "^1.4.7",
+    "csv-parse": "^7.0.2",
     "dotenv": "^17.2.0",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",

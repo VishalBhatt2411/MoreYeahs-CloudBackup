@@ -3,6 +3,7 @@ import type { OrgConnection } from '@prisma/client';
 import { config } from '../config.js';
 import { refreshOrgLogin, requireAppCredentials } from './oauth.js';
 import { latestApiVersion } from './rest.js';
+import { bulkQueryRows } from './bulk.js';
 
 export interface ObjectInfo {
   name: string;
@@ -94,6 +95,7 @@ class JsforceGateway implements SfGateway {
   constructor(
     private conn: Connection,
     public readonly apiVersion: string,
+    private refreshToken?: () => Promise<string>,
   ) {
     conn.metadata.pollInterval = 2000;
     conn.metadata.pollTimeout = 20 * 60 * 1000;
@@ -130,21 +132,29 @@ class JsforceGateway implements SfGateway {
   }
 
   async *bulkQueryPages(soql: string, opts: BulkQueryOptions = {}): AsyncGenerator<QueryPage> {
-    const stream = await this.conn.bulk2.query(soql, {
-      scanAll: !!opts.includeDeleted,
-      pollInterval: 5000,
-      pollTimeout: 60 * 60 * 1000,
-    });
     const total = opts.expectedRows ?? 0;
-    let batch: Record<string, unknown>[] = [];
-    for await (const raw of stream as AsyncIterable<Record<string, unknown>>) {
-      batch.push(coerceBulkRow(raw, opts.fieldTypes ?? {}));
-      if (batch.length >= 2000) {
-        yield { records: batch, totalSize: total };
-        batch = [];
-      }
+    const refresh = this.refreshToken;
+    let yielded = false;
+    for await (const rows of bulkQueryRows({
+      http: {
+        instanceUrl: this.conn.instanceUrl,
+        apiVersion: this.apiVersion,
+        token: () => this.conn.accessToken ?? '',
+        refresh: refresh
+          ? async () => {
+              const t = await refresh();
+              this.conn.accessToken = t;
+              return t;
+            }
+          : undefined,
+      },
+      soql,
+      scanAll: !!opts.includeDeleted,
+    })) {
+      yielded = true;
+      yield { records: rows.map((raw) => coerceBulkRow(raw, opts.fieldTypes ?? {})), totalSize: total };
     }
-    if (batch.length > 0 || total === 0) yield { records: batch, totalSize: total };
+    if (!yielded) yield { records: [], totalSize: total };
   }
 
   async describeMetadataTypes(): Promise<MetadataTypeInfo[]> {
@@ -219,7 +229,7 @@ export const realGatewayFactory: GatewayFactory = async (connection) => {
   if (fresh.instanceUrl) conn.instanceUrl = fresh.instanceUrl;
   const apiVersion = await latestApiVersion(conn.instanceUrl);
   conn.version = apiVersion;
-  return new JsforceGateway(conn, apiVersion);
+  return new JsforceGateway(conn, apiVersion, async () => (await refreshOrgLogin(connection, creds)).accessToken);
 };
 
 let factory: GatewayFactory = realGatewayFactory;

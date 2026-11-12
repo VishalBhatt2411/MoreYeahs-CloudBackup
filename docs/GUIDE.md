@@ -179,16 +179,20 @@ The one shared Connected App must be usable in each customer org. Salesforce may
 
 ## 7. Checks that were done
 
-- Backend: 101 automated tests pass (login, encryption, connect flow, backup, honest status, settings, team invites, retention, dashboard, email settings, failure alerts, invitation email, password reset, job queue and restart recovery, incremental and Bulk API copies, data explorer, email confirmation, Auditor role, legal hold and deletion). They use a **fake Salesforce** and a **fake mail server**.
+- Backend: 117 automated tests pass (login, encryption, connect flow, backup, honest status, settings, team invites, retention, dashboard, email settings, failure alerts, invitation email, password reset, job queue and restart recovery, incremental and Bulk API copies, data explorer, email confirmation, Auditor role, legal hold and deletion). They use a **fake Salesforce** and a **fake mail server**.
 - Email: a real test email was received with the owner's SMTP details, and the owner confirmed email works. Sign-up confirmation and the reset-for-a-team-member email use the same mail code and are covered by tests with the fake mail server.
-- Not run against a real org yet: **incremental copies and the Bulk API 2.0** (tested with the fake Salesforce only), and the new owner-only screens (Data protection, Send reset email) were checked by tests, not clicked through in a browser with an owner account.
+- The owner-only screens (Data protection, Send reset email) were checked by tests, not clicked through in a browser with an owner account.
 - Frontend: type check and build pass. Screens were opened in a browser, including phone width.
-- Against real Salesforce: the app was tested only with a fake Client ID. Salesforce answered that it does not recognise it, and the app showed a clear message. **A full backup of a real org has not been run yet.** It needs your Connected App. Please run a first backup on your Developer org and read the run details.
+- **Real org runs (Developer Edition org, 2026-11-12), two backups, both ended PARTIAL, never SUCCEEDED:**
+  - Run 1 (full copy, ~78 min): 119,672 records across 182 objects and about 1,700 metadata items. It exposed real problems, all fixed afterwards: very wide objects (PermissionSet, Profile and others) failed on Salesforce's query-address limit, several helper objects cannot be read at all, and Settings, Lightning components and report folders were counted as "missing" because Salesforce names them differently.
+  - Run 2 (incremental, ~87 min, restarted once so it shows 2 attempts): all 213 metadata types verified; the wide objects now copy through the Bulk API; 141 objects were updated incrementally (7,542 records new or changed, 0 deleted); no item was marked SUCCEEDED with a wrong count.
+  - Still not clean: 11 Opportunity/Order objects failed with Salesforce's **"TotalRequests Limit exceeded"** (the org's 24-hour API request allowance, used up by the two runs), and `PermissionSetTabSetting` is PARTIAL (Salesforce counts 58,071 rows but both the Bulk API and the standard API returned only about 8,390). The cause of that gap has not been found.
 
 ## 8. Known limits (not hidden)
 
 - **Not in this version:** file and attachment contents, and restore into Salesforce.
-- Records use the REST API below `BULK_THRESHOLD_ROWS` and the Bulk API 2.0 above it. The Bulk path has only been tested against a fake Salesforce so far.
+- Records use the REST API below `BULK_THRESHOLD_ROWS` and the Bulk API 2.0 above it. The Bulk path was used live only for objects with too many fields for the standard API (small row counts); a multi-page Bulk download of a large object has been tested against a fake server only.
+- A backup uses many Salesforce API calls (a Developer org's 24-hour allowance was exhausted by two runs). Space out runs on small orgs, or the last objects will fail with "TotalRequests Limit exceeded".
 - Some data is not copied, and each is listed with its reason: managed-package metadata, binary and compound fields, and some system objects. See **What a backup covers** on the org page.
 - An incremental backup is a rebuilt full snapshot: it still stores a full copy of each object on disk every time, so storage use is the same as full copies. It saves Salesforce API calls and time, not disk space.
 - Storage is the server's disk (`STORAGE_DIR`). The code is split so object storage (S3 or similar) can be added, but it is not built yet.

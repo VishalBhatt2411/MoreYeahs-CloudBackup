@@ -25,6 +25,10 @@ interface FakeOptions {
   /** Replaces the Account rows with this many generated rows (to reach the Bulk API threshold). */
   bigAccount?: number;
   failBulk?: boolean;
+  /** Bulk returns only this many rows and then stops (like the jsforce multi-page bug did). */
+  shortBulk?: number;
+  /** Account gets 500 extra fields; the standard API refuses such a long query address (HTTP 431). */
+  wideAccount?: boolean;
 }
 
 type Row = Record<string, unknown>;
@@ -95,6 +99,9 @@ function fakeGateway(opts: FakeOptions = {}) {
         ...(name === 'Account' && opts.stamped
           ? [{ name: 'SystemModstamp', type: 'datetime' }, { name: 'IsDeleted', type: 'boolean' }]
           : []),
+        ...(name === 'Account' && opts.wideAccount
+          ? Array.from({ length: 500 }, (_, i) => ({ name: `PermissionsWideField${i}`, type: 'boolean' }))
+          : []),
       ];
     },
     async countRows(name) {
@@ -102,6 +109,7 @@ function fakeGateway(opts: FakeOptions = {}) {
     },
     async *queryPages(soql, o): AsyncGenerator<QueryPage> {
       queries.push(soql);
+      if (encodeURIComponent(soql).length > 8000) throw new Error('HTTP 431 Request Header Fields Too Large');
       if (opts.gate) await opts.gate;
       const name = /FROM (\w+)/.exec(soql)![1];
       const rows = select(soql, !!o?.includeDeleted);
@@ -115,8 +123,9 @@ function fakeGateway(opts: FakeOptions = {}) {
       bulkQueries.push(soql);
       if (opts.failBulk) throw new Error('BULK_JOB_FAILED: job aborted');
       const rows = select(soql, !!o?.includeDeleted).map((r) => ({ ...r, ...(r.SystemModstamp ? { SystemModstamp: String(r.SystemModstamp).replace('+0000', 'Z') } : {}) }));
-      for (let i = 0; i < rows.length || i === 0; i += 400) {
-        yield { records: rows.slice(i, i + 400), totalSize: o?.expectedRows ?? 0 };
+      const served = opts.shortBulk !== undefined ? rows.slice(0, opts.shortBulk) : rows;
+      for (let i = 0; i < served.length || i === 0; i += 400) {
+        yield { records: served.slice(i, i + 400), totalSize: o?.expectedRows ?? 0 };
       }
     },
     async describeMetadataTypes() {
@@ -445,6 +454,27 @@ describe('large objects (Bulk API 2.0)', () => {
     const item = await prisma.backupItem.findFirstOrThrow({ where: { runId, name: 'Account' } });
     expect(item.rowCount).toBe(1200);
     expect(item.note).toMatch(/Bulk API 2\.0 failed/);
+  });
+
+  it('never settles for a short Bulk copy: it copies again with the standard API', async () => {
+    const { agent, conn, fake } = await setup({ bigAccount: 1200, shortBulk: 400 });
+    const { run, runId } = await startAndWait(agent, conn.id, { includeMetadata: false, objects: ['Account'] });
+    expect(run.status).toBe('SUCCEEDED');
+    expect(fake.bulkQueries).toHaveLength(1);
+    expect(fake.queries.some((q) => q.includes('FROM Account'))).toBe(true);
+    const item = await prisma.backupItem.findFirstOrThrow({ where: { runId, name: 'Account' } });
+    expect(item).toMatchObject({ status: 'SUCCEEDED', rowCount: 1200, expectedCount: 1200 });
+    expect(item.note).toMatch(/returned 400 of 1200 rows; copied again/);
+  });
+
+  it('sends an object with hundreds of fields through Bulk, because the standard API address would be too long', async () => {
+    const { agent, conn, fake } = await setup({ wideAccount: true });
+    const { run, runId } = await startAndWait(agent, conn.id, { includeMetadata: false, objects: ['Account'] });
+    expect(run.status).toBe('SUCCEEDED');
+    expect(fake.bulkQueries).toHaveLength(1);
+    expect(fake.queries.some((q) => q.includes('FROM Account'))).toBe(false);
+    const item = await prisma.backupItem.findFirstOrThrow({ where: { runId, name: 'Account' } });
+    expect(item.note).toMatch(/too many fields/);
   });
 });
 

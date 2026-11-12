@@ -12,6 +12,16 @@ export interface ExcludedObject {
  * as "excluded" with the reason instead of pretending to back them up.
  */
 const NEEDS_FILTER = new Set([
+  // Found in a real backup run: Salesforce answered "a filter ... is required" or similar.
+  'ApexTypeImplementor',
+  'ContentVersionRenditionContent',
+  'DataStatistics',
+  'FlowTestView',
+  'FlowVariableView',
+  'FlowVersionView',
+  'RelatedListColumnDefinition',
+  'RelatedListDefinition',
+  'UserSharedFeature',
   'AccountUserTerritory2View',
   'AppTabMember',
   'ColorDefinition',
@@ -47,6 +57,8 @@ const NEEDS_FILTER = new Set([
   'Vote',
 ]);
 
+const OUTGOING_EMAIL = new Set(['OutgoingEmail', 'OutgoingEmailRelation']);
+
 export function classifyObjects(all: ObjectInfo[]): { included: ObjectInfo[]; excluded: ExcludedObject[] } {
   const included: ObjectInfo[] = [];
   const excluded: ExcludedObject[] = [];
@@ -67,6 +79,9 @@ function exclusionReason(o: ObjectInfo): string | null {
   if (o.name.endsWith('__e')) return 'Platform event - it is a message stream, not stored records.';
   if (o.name.endsWith('__x')) return 'External object - the data lives in another system, not in Salesforce.';
   if (NEEDS_FILTER.has(o.name)) return 'System helper object - Salesforce only returns it when a special filter is used.';
+  if (OUTGOING_EMAIL.has(o.name)) return 'Salesforce does not allow these to be listed with a query (they are for sending email).';
+  if (o.name.startsWith('Datacloud')) return 'Data.com / Data Cloud lookup object - it needs a separate licence and a search criteria, and holds no stored records of yours.';
+  if (o.name === 'ExternalEncryptionRootKey') return 'Needs a connected external key-management service; Salesforce refuses to list it otherwise.';
   return null;
 }
 
