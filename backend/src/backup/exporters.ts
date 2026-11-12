@@ -232,25 +232,46 @@ export async function exportObject(gw: SfGateway, objectName: string, ctx: Expor
   // 431), so those go through Bulk API 2.0, which takes the query in the request body.
   const wide = soqlTooLongForUrl(soql);
   const useBulk = wide || (count !== null && count >= config.bulkThresholdRows);
-  let written: Written;
-  if (useBulk) {
+
+  const copyAll = async (q: string): Promise<Written> => {
+    if (!useBulk) return writeFull(gw, relFile, q, false, count, fieldTypes);
+    let w: Written;
     let bulkOk = false;
     try {
-      written = await writeFull(gw, relFile, soql, true, count, fieldTypes);
-      notes.push(`Copied with Bulk API 2.0 (${written.rowCount} rows${wide ? '; the object has too many fields for the standard API' : ''}).`);
+      w = await writeFull(gw, relFile, q, true, count, fieldTypes);
+      notes.push(`Copied with Bulk API 2.0 (${w.rowCount} rows${wide ? '; the object has too many fields for the standard API' : ''}).`);
       bulkOk = true;
     } catch (e) {
       if (wide) throw e;
       notes.push(`Bulk API 2.0 failed (${msg(e).slice(0, 200)}); copied with the standard API instead.`);
-      written = await writeFull(gw, relFile, soql, false, count, fieldTypes);
+      w = await writeFull(gw, relFile, q, false, count, fieldTypes);
     }
     // Never settle for a short Bulk copy when the standard API can still do the job.
-    if (bulkOk && !wide && count !== null && written.rowCount !== count) {
-      notes.push(`Bulk API 2.0 returned ${written.rowCount} of ${count} rows; copied again with the standard API.`);
-      written = await writeFull(gw, relFile, soql, false, count, fieldTypes);
+    if (bulkOk && !wide && count !== null && w.rowCount !== count) {
+      notes.push(`Bulk API 2.0 returned ${w.rowCount} of ${count} rows; copied again with the standard API.`);
+      w = await writeFull(gw, relFile, q, false, count, fieldTypes);
     }
-  } else {
-    written = await writeFull(gw, relFile, soql, false, count, fieldTypes);
+    return w;
+  };
+
+  let written = await copyAll(soql);
+
+  // Some objects (found live: PermissionSetTabSetting) silently drop rows whenever the derived
+  // "Name" field is selected. If the copy is short, try once more without it. The rows keep every
+  // other field, and the note says plainly what was left out. Still short -> PARTIAL, as always.
+  if (count !== null && written.rowCount < count && names.includes('Name') && names.length > 1) {
+    const without = names.filter((n) => n !== 'Name');
+    const retry = await copyAll(`SELECT ${without.join(', ')} FROM ${objectName}`);
+    if (retry.rowCount === count) {
+      notes.push(`Selecting the Name field made Salesforce return only ${written.rowCount} of ${count} rows, so Name was left out to keep every record.`);
+      written = retry;
+    } else if (retry.rowCount > written.rowCount) {
+      notes.push(`Selecting the Name field returned only ${written.rowCount} of ${count} rows; without it ${retry.rowCount} came back, still short.`);
+      written = retry;
+    } else {
+      // The retry was no better and replaced the file; redo the original so the file matches what is reported.
+      written = await copyAll(soql);
+    }
   }
   return verifyAndBuild(relFile, written, notes, {
     mode: 'FULL',

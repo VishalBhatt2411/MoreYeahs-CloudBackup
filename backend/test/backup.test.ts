@@ -29,6 +29,8 @@ interface FakeOptions {
   shortBulk?: number;
   /** Account gets 500 extra fields; the standard API refuses such a long query address (HTTP 431). */
   wideAccount?: boolean;
+  /** Any Account query that selects the Name field returns only this many rows. */
+  nameDropsRows?: number;
 }
 
 type Row = Record<string, unknown>;
@@ -78,7 +80,10 @@ function fakeGateway(opts: FakeOptions = {}) {
     const since = sinceOf(soql);
     const pick = (rows: Row[]) => rows.filter((r) => since === null || Date.parse(String(r.SystemModstamp).replace(/\+0000$/, 'Z')) >= since);
     if (includeDeleted && /IsDeleted = true/.test(soql)) return project(pick(deleted[name] ?? []), soql);
-    return project(pick(data[name] ?? []), soql);
+    const out = project(pick(data[name] ?? []), soql);
+    // Like PermissionSetTabSetting live: selecting Name makes Salesforce drop rows.
+    const selectsName = /^SELECT (.+?) FROM /.exec(soql)![1].split(',').some((c) => c.trim() === 'Name');
+    return opts.nameDropsRows !== undefined && name === 'Account' && selectsName ? out.slice(0, opts.nameDropsRows) : out;
   };
 
   const gw: SfGateway = {
@@ -475,6 +480,48 @@ describe('large objects (Bulk API 2.0)', () => {
     expect(fake.queries.some((q) => q.includes('FROM Account'))).toBe(false);
     const item = await prisma.backupItem.findFirstOrThrow({ where: { runId, name: 'Account' } });
     expect(item.note).toMatch(/too many fields/);
+  });
+});
+
+describe('objects where selecting Name silently drops rows', () => {
+  const only = { includeMetadata: false, objects: ['Account'] };
+
+  it('copies again without Name, keeps every record, and says what was left out', async () => {
+    const { agent, conn } = await setup({ bigAccount: 1200, nameDropsRows: 500 });
+    const { run, runId } = await startAndWait(agent, conn.id, only);
+    expect(run.status).toBe('SUCCEEDED');
+    const item = await prisma.backupItem.findFirstOrThrow({ where: { runId, name: 'Account' } });
+    expect(item).toMatchObject({ status: 'SUCCEEDED', rowCount: 1200, expectedCount: 1200 });
+    expect(item.note).toMatch(/Name field made Salesforce return only 500 of 1200 rows, so Name was left out/);
+    const lines = gunzipSync(await readFile(absPath(item.filePath!))).toString('utf8').trim().split('\n');
+    expect(lines).toHaveLength(1200);
+    expect(JSON.parse(lines[0]!)).not.toHaveProperty('Name');
+    expect(JSON.parse(lines[0]!)).toHaveProperty('Id');
+  });
+
+  it('works for small objects on the standard API too', async () => {
+    const { agent, conn } = await setup({ nameDropsRows: 2 });
+    const { run, runId } = await startAndWait(agent, conn.id, only);
+    expect(run.status).toBe('SUCCEEDED');
+    const item = await prisma.backupItem.findFirstOrThrow({ where: { runId, name: 'Account' } });
+    expect(item).toMatchObject({ status: 'SUCCEEDED', rowCount: 3, expectedCount: 3 });
+  });
+
+  it('stays PARTIAL when leaving Name out still does not give every row', async () => {
+    const { agent, conn } = await setup({ nameDropsRows: 2, totalSizeOverride: { Account: 5 } });
+    const { run, runId } = await startAndWait(agent, conn.id, only);
+    expect(run.status).toBe('PARTIAL');
+    const item = await prisma.backupItem.findFirstOrThrow({ where: { runId, name: 'Account' } });
+    expect(item.status).toBe('PARTIAL');
+    expect(item.rowCount).toBe(3);
+    expect(item.note).toMatch(/still short/);
+  });
+
+  it('does not touch objects whose copy is complete', async () => {
+    const { agent, conn } = await setup();
+    const { runId } = await startAndWait(agent, conn.id, only);
+    const item = await prisma.backupItem.findFirstOrThrow({ where: { runId, name: 'Account' } });
+    expect(item.note ?? '').not.toMatch(/Name/);
   });
 });
 
