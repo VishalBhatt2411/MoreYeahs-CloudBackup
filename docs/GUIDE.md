@@ -96,10 +96,33 @@ If **Test with Salesforce** shows "retry your request", the new Connected App is
 ## 4. Take a backup
 
 1. **Organizations → Connect Salesforce**. Choose Production or Sandbox. Log in at Salesforce and allow access.
-2. Open the org. Click **Start backup**. Optionally pick objects.
-3. Open **Backup runs → Details**. You see, for each item, what Salesforce said exists ("expected"), what was saved, the size, and a SHA-256 checksum.
-4. **Download everything (.zip)** or download single files.
+2. Open the org. Under **Start a backup**, choose what to copy (see below), then click **Start backup**.
+3. Open **Backup runs → Details**. Items are grouped into the same sections. For each item you see what Salesforce said exists ("expected"), what was saved, the size, and a SHA-256 checksum.
+4. Use **Download** to get readable Excel or CSV files (see below).
 5. Optionally set **Automatic backups** (every 6 h, 12 h, day, week).
+
+### Choosing what to back up
+
+The org page lists what is in the org, in two parts, each split into sections:
+
+- **Records** (the data): Sales, Service & Marketing; Custom objects; Activities, Files & Collaboration; Users & Access records; History, Sharing & Feeds; Other standard & system objects.
+- **Configuration** (the setup): Objects & Fields; Security & Access; Apex Code & Pages; Automation & Workflows; Layouts, Apps & Lightning UI; Reports & Dashboards; Email, Documents & Notifications; Integrations & Connections; Org Settings; Other configuration.
+
+Tick a whole section, or open **Choose objects / Choose types** to pick single items (there is a search box). Quick presets at the top: Everything, Configuration only, Records only, Security only, Code & automation, Business data. At least one item must be ticked.
+
+- **Use this selection for automatic backups too** saves the choice for scheduled backups. Without it, scheduled backups copy everything. You can also set it later with **Use the selection above** under Automatic backups.
+- Records-only runs skip configuration and the other way round.
+
+### Downloading a backup in a readable form
+
+On the run page, **Download** gives a clean copy that people who do not know Salesforce can read:
+
+- **Format**: Excel (.xlsx) or CSV. **Column names**: plain names ("Account Name") or Salesforce API names (`Name`, `Industry__c`).
+- **Download everything** gives one folder: `README.txt`, `00 Summary` (overview, every item, what was not copied), `1 Records` (one workbook per section, one sheet per object) and `2 Configuration` (one workbook per section; for example Profiles become tables of object access, field access and system permissions). Every workbook starts with an **Index** sheet and, for records, a **Field Guide** that explains each column. Apex and Visualforce code is also saved as readable files in a `Source code` folder.
+- **Download this group** and the per-item **Download** give just that part.
+- Excel files keep numbers, dates and Yes/No as real values. In CSV files, text that looks like a formula gets a leading apostrophe so Excel cannot run it.
+- **Raw archive (.zip)** is the exact stored files, for technical use. Only Owner, Admin and Viewer can download; an Auditor cannot.
+- A backup that is still running cannot be downloaded yet.
 
 ### Dashboard and Settings
 
@@ -179,10 +202,11 @@ The one shared Connected App must be usable in each customer org. Salesforce may
 
 ## 7. Checks that were done
 
-- Backend: 121 automated tests pass (login, encryption, connect flow, backup, honest status, settings, team invites, retention, dashboard, email settings, failure alerts, invitation email, password reset, job queue and restart recovery, incremental and Bulk API copies, data explorer, email confirmation, Auditor role, legal hold and deletion). They use a **fake Salesforce** and a **fake mail server**.
+- Backend: 150 automated tests pass (login, encryption, connect flow, backup, honest status, settings, team invites, retention, dashboard, email settings, failure alerts, invitation email, password reset, job queue and restart recovery, incremental and Bulk API copies, data explorer, email confirmation, Auditor role, legal hold and deletion, choosing what to back up, the sections, and the Excel/CSV downloads). They use a **fake Salesforce** and a **fake mail server**.
 - Email: a real test email was received with the owner's SMTP details, and the owner confirmed email works. Sign-up confirmation and the reset-for-a-team-member email use the same mail code and are covered by tests with the fake mail server.
 - The owner-only screens (Data protection, Send reset email) were checked by tests, not clicked through in a browser with an owner account.
 - Frontend: type check and build pass. Screens were opened in a browser, including phone width.
+- **Choosing and readable downloads** were checked by tests and by clicking through the running app against the **fake Salesforce** (picker and presets, a security-only run, a full run, and Excel, CSV, per-group, per-item and raw downloads, whose contents were opened and read). They were **not** run against a real org yet, and a large multi-page download was not tried.
 - **Real org runs (Developer Edition org, 2026-11-12), two backups, both ended PARTIAL, never SUCCEEDED:**
   - Run 1 (full copy, ~78 min): 119,672 records across 182 objects and about 1,700 metadata items. It exposed real problems, all fixed afterwards: very wide objects (PermissionSet, Profile and others) failed on Salesforce's query-address limit, several helper objects cannot be read at all, and Settings, Lightning components and report folders were counted as "missing" because Salesforce names them differently.
   - Run 2 (incremental, ~87 min, restarted once so it shows 2 attempts): all 213 metadata types verified; the wide objects now copy through the Bulk API; 141 objects were updated incrementally (7,542 records new or changed, 0 deleted); no item was marked SUCCEEDED with a wrong count.

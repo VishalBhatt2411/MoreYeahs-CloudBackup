@@ -74,6 +74,10 @@ export interface RunItem {
   id: string;
   kind: 'OBJECT' | 'METADATA';
   name: string;
+  /** Plain-language name (for configuration types). */
+  label?: string;
+  /** The section this item belongs to, e.g. "data.business" or "meta.security". */
+  category?: string;
   status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'PARTIAL' | 'FAILED';
   expectedCount: number | null;
   rowCount: number | null;
@@ -90,6 +94,7 @@ export interface RunItem {
 export interface RunDetail extends Run {
   summary: { total: number; succeeded: number; partial: number; failed: number; pending: number; rows: number; bytes: number };
   items: RunItem[];
+  categories?: { id: string; kind: 'data' | 'metadata'; order: number; label: string; description: string }[];
 }
 
 export function formatBytes(n: number | null | undefined) {

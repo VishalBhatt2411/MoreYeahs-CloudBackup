@@ -210,6 +210,8 @@ model OrgConnection {
   lastCheckedAt   DateTime?
   scheduleHours   Int?
   nextRunAt       DateTime?
+  /// What automatic backups cover (same shape as a manual run's selection). Null = everything.
+  defaultSelection Json?
   runs            BackupRun[]
   checkpoints     ObjectCheckpoint[]
 

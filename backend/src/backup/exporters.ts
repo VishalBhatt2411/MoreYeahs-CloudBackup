@@ -46,6 +46,8 @@ export interface ExportCtx {
   /** True when the run may copy only what changed. */
   wantIncremental: boolean;
   baseline: Baseline | null;
+  /** The name people see for the object (for example "Account" or "Project Task"). Saved next to the copy. */
+  objectLabel?: string;
 }
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -187,6 +189,23 @@ async function incrementalBlocker(ctx: ExportCtx, names: string[], hasStamp: boo
   return null;
 }
 
+/** Where the field list (names, labels, types) of an object's copy is kept. */
+export const schemaRelPath = (relDir: string, objectName: string) => join(relDir, 'schema', `${safeName(objectName)}.json`);
+
+/**
+ * Saves the object's field list next to its copy. The Excel / CSV download uses it to show
+ * readable column headings ("Billing City" instead of BillingCity) and to format dates and numbers.
+ * Failing to write it must never fail the backup itself, so errors are swallowed.
+ */
+async function writeSchema(relDir: string, objectName: string, fields: FieldInfo[], objectLabel?: string) {
+  try {
+    const body = { object: objectName, label: objectLabel ?? objectName, fields: fields.map((f) => ({ name: f.name, label: f.label ?? f.name, type: f.type })) };
+    await getStorage().writeFile(schemaRelPath(relDir, objectName), JSON.stringify(body));
+  } catch {
+    /* labels are a nicety */
+  }
+}
+
 /**
  * Copies one object into a compressed JSON-lines file (one record per line), then proves the
  * copy is good: the file's checksum is re-read from storage, the rows are counted again and
@@ -207,6 +226,7 @@ export async function exportObject(gw: SfGateway, objectName: string, ctx: Expor
   const names = kept.map((f) => f.name);
   names.sort((a, b) => (a === 'Id' ? -1 : b === 'Id' ? 1 : 0));
   const fieldTypes = Object.fromEntries(kept.map((f) => [f.name, f.type]));
+  await writeSchema(ctx.relDir, objectName, kept, ctx.objectLabel);
   const hasStamp = names.includes('SystemModstamp');
   const hasIsDeleted = fields.some((f) => f.name === 'IsDeleted');
   const soql = `SELECT ${names.join(', ')} FROM ${objectName}`;

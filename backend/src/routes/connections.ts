@@ -1,13 +1,14 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import type { OrgConnection } from '@prisma/client';
+import { Prisma, type OrgConnection } from '@prisma/client';
 import { prisma } from '../db.js';
 import { audit } from '../lib/audit.js';
 import { decrypt } from '../lib/crypto.js';
 import { HttpError, wrap } from '../lib/http.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { classifyObjects } from '../backup/coverage.js';
-import { startRun } from '../backup/runner.js';
+import { CATEGORIES, categoryOfMetadataType, categoryOfObject, metadataTypeLabel } from '../backup/categories.js';
+import { normalizeOptions, startRun } from '../backup/runner.js';
 import { getGateway } from '../salesforce/gateway.js';
 import { SalesforceAuthError, fetchIdentity, refreshOrgLogin, requireAppCredentials, revokeToken } from '../salesforce/oauth.js';
 
@@ -30,6 +31,7 @@ function publicView(c: OrgConnection) {
     lastCheckedAt: c.lastCheckedAt,
     scheduleHours: c.scheduleHours,
     nextRunAt: c.nextRunAt,
+    defaultSelection: c.defaultSelection ?? null,
   };
 }
 
@@ -129,10 +131,39 @@ connectionsRouter.get(
     const { included, excluded } = classifyObjects(objects);
     res.json({
       apiVersion: gw.apiVersion,
-      objects: included.map((o) => ({ name: o.name, label: o.label, custom: o.custom })),
+      categories: CATEGORIES,
+      objects: included.map((o) => ({ name: o.name, label: o.label, custom: o.custom, category: categoryOfObject(o.name) })),
       excludedObjects: excluded,
-      metadataTypes: types.map((t) => t.xmlName).sort(),
+      metadataTypes: types
+        .map((t) => ({ name: t.xmlName, label: metadataTypeLabel(t.xmlName), category: categoryOfMetadataType(t.xmlName) }))
+        .sort((a, b) => a.label.localeCompare(b.label)),
+      defaultSelection: c.defaultSelection ?? null,
     });
+  }),
+);
+
+const selectionSchema = z.object({
+  includeRecords: z.boolean().optional(),
+  includeMetadata: z.boolean().optional(),
+  categories: z.array(z.string().regex(/^(data|meta)\.[a-z]+$/)).max(40).optional(),
+  objects: z.array(z.string().regex(/^[A-Za-z0-9_]+$/)).max(4000).optional(),
+  metadataTypes: z.array(z.string().regex(/^[A-Za-z0-9_]+$/)).max(1000).optional(),
+});
+
+/** Saves which parts of the org automatic backups should cover. Send null to go back to "everything". */
+connectionsRouter.put(
+  '/:id/selection',
+  requireRole('OWNER', 'ADMIN'),
+  wrap(async (req, res) => {
+    const body = z.object({ selection: selectionSchema.nullable() }).parse(req.body);
+    const c = await findMine(req.user!.tenantId, req.params.id);
+    const options = body.selection ? normalizeOptions(body.selection) : null;
+    if (options && options.includeMetadata === false && options.includeRecords === false) {
+      throw new HttpError(400, 'Choose at least records or configuration to back up.');
+    }
+    await prisma.orgConnection.update({ where: { id: c.id }, data: { defaultSelection: (options ?? Prisma.DbNull) as never } });
+    await audit(c.tenantId, req.user!.id, 'org.selection', c.id, options ? 'custom selection for automatic backups' : 'everything');
+    res.json({ defaultSelection: options });
   }),
 );
 
@@ -159,13 +190,10 @@ connectionsRouter.post(
   '/:id/runs',
   requireRole('OWNER', 'ADMIN'),
   wrap(async (req, res) => {
-    const body = z
-      .object({
-        includeMetadata: z.boolean().optional(),
-        objects: z.array(z.string().regex(/^[A-Za-z0-9_]+$/)).max(2000).optional(),
-        fullCopy: z.boolean().optional(),
-      })
-      .parse(req.body ?? {});
+    const body = selectionSchema.extend({ fullCopy: z.boolean().optional() }).parse(req.body ?? {});
+    if (body.includeMetadata === false && body.includeRecords === false) {
+      throw new HttpError(400, 'Choose at least records or configuration to back up.');
+    }
     const c = await findMine(req.user!.tenantId, req.params.id);
     const run = await startRun({ connection: c, userId: req.user!.id, trigger: 'manual', options: body });
     res.status(202).json({ run: { id: run.id, status: run.status } });

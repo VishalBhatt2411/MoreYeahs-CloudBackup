@@ -1,15 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, errText, formatDate, type Connection } from '../api';
 import { canManage, useAuth } from '../auth';
+import BackupPicker from '../BackupPicker';
+import { buildSelection, fromSaved, type Coverage } from '../selection';
 import { Notice, PageHead, StatusPill, useLoad, useToast } from '../ui';
-
-interface Coverage {
-  apiVersion: string;
-  objects: { name: string; label: string; custom: boolean }[];
-  excludedObjects: { name: string; reason: string }[];
-  metadataTypes: string[];
-}
 
 const SCHEDULES = [
   { value: '', label: 'Off (manual only)' },
@@ -35,11 +30,9 @@ export default function OrgDetail() {
   const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [coverageError, setCoverageError] = useState<string | null>(null);
 
-  const [includeMetadata, setIncludeMetadata] = useState(true);
   const [fullCopy, setFullCopy] = useState(false);
-  const [pickObjects, setPickObjects] = useState(false);
-  const [chosen, setChosen] = useState<Set<string>>(new Set());
-  const [filter, setFilter] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [useForSchedule, setUseForSchedule] = useState(false);
 
   async function act<T>(name: string, fn: () => Promise<T>) {
     setError(null);
@@ -58,19 +51,43 @@ export default function OrgDetail() {
     setCoverageError(null);
     await act('coverage', async () => {
       try {
-        setCoverage(await api<Coverage>(`/connections/${id}/coverage`));
+        const cov = await api<Coverage>(`/connections/${id}/coverage`);
+        setCoverage(cov);
+        setSelected(fromSaved(cov, cov.defaultSelection));
       } catch (e) {
         setCoverageError(errText(e));
       }
     });
   }
 
+  // What can be backed up is fetched once the org is known to be connected.
+  const isActive = c?.status === 'ACTIVE';
+  useEffect(() => {
+    if (isActive && !coverage && !coverageError) void loadCoverage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive, id]);
+
+  const built = coverage ? buildSelection(coverage, selected) : null;
+
   async function startBackup() {
-    const body: { includeMetadata: boolean; objects?: string[]; fullCopy?: boolean } = { includeMetadata };
-    if (fullCopy) body.fullCopy = true;
-    if (pickObjects) body.objects = [...chosen];
-    const r = await act('run', () => api<{ run: { id: string } }>(`/connections/${id}/runs`, { method: 'POST', body }));
+    if (!built || built.empty) return;
+    const r = await act('run', async () => {
+      if (useForSchedule) {
+        await api(`/connections/${id}/selection`, { method: 'PUT', body: { selection: built.everything ? null : built.selection } });
+      }
+      const body = { ...built.selection, ...(fullCopy ? { fullCopy: true } : {}) };
+      return api<{ run: { id: string } }>(`/connections/${id}/runs`, { method: 'POST', body });
+    });
     if (r) navigate(`/runs/${r.run.id}`);
+  }
+
+  async function saveForSchedule() {
+    if (!built || built.empty) return;
+    const r = await act('selection', () => api(`/connections/${id}/selection`, { method: 'PUT', body: { selection: built.everything ? null : built.selection } }));
+    if (r) {
+      setCoverage((cv) => (cv ? { ...cv, defaultSelection: built.everything ? null : built.selection } : cv));
+      toast.show(built.everything ? 'Automatic backups will cover everything.' : 'Automatic backups will use this selection.');
+    }
   }
 
   async function check() {
@@ -95,15 +112,11 @@ export default function OrgDetail() {
     if (r) navigate('/orgs');
   }
 
-  const visibleObjects = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    return (coverage?.objects ?? []).filter((o) => !q || o.name.toLowerCase().includes(q) || o.label.toLowerCase().includes(q));
-  }, [coverage, filter]);
-
   if (org.error && !c) return <Notice kind="error">{org.error}</Notice>;
   if (!c) return <div className="empty">Loading…</div>;
 
   const active = c.status === 'ACTIVE';
+  const savedIsCustom = !!coverage?.defaultSelection;
 
   return (
     <>
@@ -130,67 +143,55 @@ export default function OrgDetail() {
           <div className="panel-head">
             <div>
               <h2>Start a backup</h2>
-              <p>Copies metadata (settings, code, layouts) and record data. Nothing is ever written back to Salesforce.</p>
+              <p>Choose what to copy. Nothing is ever written back to Salesforce. When it finishes, you can download everything as organised Excel or CSV files.</p>
             </div>
           </div>
           {!manage ? (
             <Notice>View-only access. Owners and admins can start backups.</Notice>
           ) : (
             <>
-              <div className="field">
-                <label><input type="checkbox" checked={includeMetadata} onChange={(e) => setIncludeMetadata(e.target.checked)} /> Include metadata</label>
-              </div>
-              <div className="field">
-                <label><input type="checkbox" checked={fullCopy} onChange={(e) => setFullCopy(e.target.checked)} /> Read everything again (full copy)</label>
-                <small>By default only records changed since the last good backup are read from Salesforce, and the rest is carried over, so each backup is still a complete snapshot. Tick this to re-read every record.</small>
-              </div>
-              <div className="field">
-                <label><input type="checkbox" checked={pickObjects} onChange={(e) => { setPickObjects(e.target.checked); if (e.target.checked && !coverage) void loadCoverage(); }} /> Choose which objects to back up (default: all that can be copied)</label>
-              </div>
-              {pickObjects && (
-                <div className="field">
-                  {coverageError && <Notice kind="error">{coverageError}</Notice>}
-                  {!coverage && !coverageError && <small>Loading object list…</small>}
-                  {coverage && (
-                    <>
-                      <input placeholder="Search objects" value={filter} onChange={(e) => setFilter(e.target.value)} />
-                      <div className="row">
-                        <small>{chosen.size} selected</small>
-                        <span>
-                          <button className="link" onClick={() => setChosen(new Set(visibleObjects.map((o) => o.name)))}>Select shown</button>{' · '}
-                          <button className="link" onClick={() => setChosen(new Set())}>Clear</button>
-                        </span>
-                      </div>
-                      <div className="list-cols" style={{ maxHeight: 220, overflow: 'auto' }}>
-                        {visibleObjects.map((o) => (
-                          <div key={o.name}>
-                            <label>
-                              <input
-                                type="checkbox"
-                                checked={chosen.has(o.name)}
-                                onChange={(e) => {
-                                  const next = new Set(chosen);
-                                  if (e.target.checked) next.add(o.name);
-                                  else next.delete(o.name);
-                                  setChosen(next);
-                                }}
-                              />{' '}
-                              {o.name}
-                            </label>
-                          </div>
-                        ))}
-                      </div>
-                    </>
-                  )}
-                </div>
+              {coverageError && (
+                <Notice kind="error">
+                  {coverageError} <button className="link" onClick={() => void loadCoverage()}>Try again</button>
+                </Notice>
               )}
-              <button
-                className="btn primary"
-                disabled={!!busy || (!includeMetadata && pickObjects && chosen.size === 0)}
-                onClick={() => void startBackup()}
-              >
-                {busy === 'run' ? 'Starting…' : 'Start backup'}
-              </button>
+              {!coverage && !coverageError && <div className="empty">Reading what is in this org…</div>}
+              {coverage && built && (
+                <>
+                  <BackupPicker coverage={coverage} selected={selected} onChange={setSelected} />
+
+                  <div className="pick-bar">
+                    <div className="pick-summary">
+                      {built.empty ? (
+                        <strong>Nothing selected yet</strong>
+                      ) : (
+                        <>
+                          <strong>{built.everything ? 'Everything' : 'Your selection'}</strong>
+                          <span>
+                            {built.objects.toLocaleString()} of {coverage.objects.length.toLocaleString()} objects · {built.types.toLocaleString()} of {coverage.metadataTypes.length.toLocaleString()} configuration types
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    <div className="pick-options">
+                      <label className="check">
+                        <input type="checkbox" checked={fullCopy} onChange={(e) => setFullCopy(e.target.checked)} />
+                        Read every record again (full copy)
+                      </label>
+                      <label className="check">
+                        <input type="checkbox" checked={useForSchedule} onChange={(e) => setUseForSchedule(e.target.checked)} />
+                        Use this selection for automatic backups too
+                      </label>
+                    </div>
+                    <button className="btn primary" disabled={!!busy || built.empty} onClick={() => void startBackup()}>
+                      {busy === 'run' ? 'Starting…' : 'Start backup'}
+                    </button>
+                  </div>
+                  <p className="hint-line">
+                    By default only records changed since the last good backup are read, and the rest is carried over, so every backup is still a complete snapshot. Tick "full copy" to read everything again.
+                  </p>
+                </>
+              )}
             </>
           )}
         </div>
@@ -210,44 +211,40 @@ export default function OrgDetail() {
               {c.scheduleHours && !SCHEDULES.some((s) => s.value === String(c.scheduleHours)) && <option value={String(c.scheduleHours)}>Every {c.scheduleHours} hours</option>}
             </select>
           </div>
+          {coverage && built && (
+            <div className="row" style={{ justifyContent: 'flex-start', gap: 14 }}>
+              <span className="hint-line">
+                Automatic backups currently cover: <b>{savedIsCustom ? 'a custom selection' : 'everything'}</b>.
+              </span>
+              <button className="btn secondary small" disabled={!!busy || built.empty} onClick={() => void saveForSchedule()}>
+                {busy === 'selection' ? 'Saving…' : 'Use the selection above'}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
-      {active && (
+      {active && coverage && (
         <div className="panel">
           <div className="panel-head">
             <div>
-              <h2>What a backup covers</h2>
-              <p>See which objects and metadata types are copied, and which are left out and why.</p>
+              <h2>What is left out</h2>
+              <p>API version {coverage.apiVersion}. Some objects cannot be copied through Salesforce's API; they are listed here with the reason.</p>
             </div>
-            <button className="btn secondary small" disabled={!!busy} onClick={() => void loadCoverage()}>{busy === 'coverage' ? 'Loading…' : coverage ? 'Refresh' : 'Show coverage'}</button>
+            <button className="btn secondary small" disabled={!!busy} onClick={() => void loadCoverage()}>{busy === 'coverage' ? 'Loading…' : 'Refresh list'}</button>
           </div>
-          {coverageError && <Notice kind="error">{coverageError}</Notice>}
-          {coverage && (
-            <>
-              <p>API version {coverage.apiVersion}. <b>{coverage.objects.length}</b> objects and <b>{coverage.metadataTypes.length}</b> metadata types can be copied.</p>
-              <details>
-                <summary>Objects included ({coverage.objects.length})</summary>
-                <div className="list-cols">{coverage.objects.map((o) => <div key={o.name}>{o.name}</div>)}</div>
-              </details>
-              <details>
-                <summary>Objects not copied ({coverage.excludedObjects.length})</summary>
-                <div className="table-wrap">
-                  <table>
-                    <thead><tr><th>OBJECT</th><th>WHY</th></tr></thead>
-                    <tbody>{coverage.excludedObjects.map((o) => <tr key={o.name}><td>{o.name}</td><td>{o.reason}</td></tr>)}</tbody>
-                  </table>
-                </div>
-              </details>
-              <details>
-                <summary>Metadata types ({coverage.metadataTypes.length})</summary>
-                <div className="list-cols">{coverage.metadataTypes.map((t) => <div key={t}>{t}</div>)}</div>
-              </details>
-              <Notice>
-                Not in this version: file and attachment contents, and restoring data back into Salesforce. Installed managed-package metadata is skipped because Salesforce does not allow it to be copied.
-              </Notice>
-            </>
-          )}
+          <details>
+            <summary>Objects that cannot be copied ({coverage.excludedObjects.length})</summary>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>OBJECT</th><th>WHY</th></tr></thead>
+                <tbody>{coverage.excludedObjects.map((o) => <tr key={o.name}><td>{o.label && o.label !== o.name ? `${o.label} (${o.name})` : o.name}</td><td>{o.reason}</td></tr>)}</tbody>
+              </table>
+            </div>
+          </details>
+          <Notice>
+            Not in this version: file and attachment contents, and restoring data back into Salesforce. Installed managed-package metadata is skipped because Salesforce does not allow it to be copied.
+          </Notice>
         </div>
       )}
 

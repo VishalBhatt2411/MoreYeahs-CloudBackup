@@ -8,17 +8,35 @@ import { audit } from '../lib/audit.js';
 import { HttpError } from '../lib/http.js';
 import { getGateway, type SfGateway } from '../salesforce/gateway.js';
 import { sendRunAlert } from './alerts.js';
+import { isCategoryId, planFilter, type Selection } from './categories.js';
 import { classifyObjects, type ExcludedObject } from './coverage.js';
 import { exportMetadataType, exportObject, type Baseline, type FileEntry, type ItemResult } from './exporters.js';
 import { purgeAllTenants } from './retention.js';
 import { getStorage, runRelDir } from './storage.js';
 
-export interface RunOptions {
+/**
+ * What a run was asked to copy: record data and/or configuration, either all of it or only chosen
+ * sections (categories) and individual items. See categories.ts for how the choice is applied.
+ */
+export interface RunOptions extends Selection {
+  /** Copy configuration (metadata). Default true. */
   includeMetadata: boolean;
-  /** Names of objects to copy. Empty / missing = every copyable object. */
-  objects?: string[];
   /** True = copy every record again instead of only what changed. */
   fullCopy?: boolean;
+}
+
+const nonEmpty = (a?: string[]) => (a && a.length ? [...new Set(a)] : undefined);
+
+/** Cleans up what the caller asked for into what is stored on the run. */
+export function normalizeOptions(input?: Partial<RunOptions>): RunOptions {
+  return {
+    includeMetadata: input?.includeMetadata ?? true,
+    includeRecords: input?.includeRecords === false ? false : undefined,
+    objects: nonEmpty(input?.objects),
+    metadataTypes: nonEmpty(input?.metadataTypes),
+    categories: nonEmpty(input?.categories)?.filter(isCategoryId),
+    fullCopy: input?.fullCopy ? true : undefined,
+  };
 }
 
 /** Per organisation: one backup running and one waiting. A third request is refused. */
@@ -53,11 +71,9 @@ export async function startRun(args: {
     throw new HttpError(409, 'This org already has a backup running and another waiting. Please wait for them to finish.', 'run_queue_full');
   }
 
-  const options: RunOptions = {
-    includeMetadata: args.options?.includeMetadata ?? true,
-    objects: args.options?.objects?.length ? args.options.objects : undefined,
-    fullCopy: args.options?.fullCopy ? true : undefined,
-  };
+  // Automatic backups use the selection saved for the org (if any), manual ones use what was chosen.
+  const saved = args.options ? null : (connection.defaultSelection as Partial<RunOptions> | null);
+  const options = normalizeOptions(args.options ?? saved ?? undefined);
   const run = await prisma.backupRun.create({
     data: {
       tenantId: connection.tenantId,
@@ -262,26 +278,33 @@ async function processRun(run: ClaimedRun) {
 
 async function buildPlan(gw: SfGateway, options: RunOptions) {
   const excluded: ExcludedObject[] = [];
-  const planned: { kind: 'METADATA' | 'OBJECT'; name: string; inFolder?: boolean }[] = [];
+  const planned: { kind: 'METADATA' | 'OBJECT'; name: string; inFolder?: boolean; label?: string }[] = [];
 
-  if (options.includeMetadata) {
+  const filter = planFilter(options);
+
+  if (filter.metadata) {
     const types = await gw.describeMetadataTypes();
     for (const t of types.sort((a, b) => a.xmlName.localeCompare(b.xmlName))) {
-      planned.push({ kind: 'METADATA', name: t.xmlName, inFolder: t.inFolder });
+      if (!filter.wantsMetadataType || filter.wantsMetadataType(t.xmlName)) {
+        planned.push({ kind: 'METADATA', name: t.xmlName, inFolder: t.inFolder });
+      }
     }
   }
-  const all = await gw.describeGlobal();
-  const { included, excluded: ex } = classifyObjects(all);
-  excluded.push(...ex);
-  const wanted = options.objects?.length ? new Set(options.objects) : null;
-  for (const o of included) {
-    if (!wanted || wanted.has(o.name)) planned.push({ kind: 'OBJECT', name: o.name });
-  }
-  if (wanted) {
-    const known = new Set(all.map((o) => o.name));
-    for (const n of wanted) {
-      if (!included.some((o) => o.name === n)) {
-        excluded.push({ name: n, label: n, reason: known.has(n) ? 'Not copied (excluded - see the coverage list).' : 'This object does not exist in the org.' });
+  if (filter.records) {
+    const all = await gw.describeGlobal();
+    const { included, excluded: ex } = classifyObjects(all);
+    // Objects that cannot be copied are only worth listing if the user could have wanted them.
+    excluded.push(...(filter.wantsObject ? ex.filter((e) => filter.wantsObject!(e.name)) : ex));
+    for (const o of included) {
+      if (!filter.wantsObject || filter.wantsObject(o.name)) planned.push({ kind: 'OBJECT', name: o.name, label: o.label });
+    }
+    const asked = options.objects ?? [];
+    if (asked.length) {
+      const known = new Set(all.map((o) => o.name));
+      for (const n of asked) {
+        if (!included.some((o) => o.name === n) && !excluded.some((e) => e.name === n)) {
+          excluded.push({ name: n, label: n, reason: known.has(n) ? 'Not copied (excluded - see the coverage list).' : 'This object does not exist in the org.' });
+        }
       }
     }
   }
@@ -347,6 +370,7 @@ async function executeRun(run: ClaimedRun, connection: OrgConnection, lost: () =
   }
   // Keep the plan's order (metadata first, then objects), also when resuming.
   const order = new Map(planned.map((p, i) => [`${p.kind}:${p.name}`, i]));
+  const objectLabel = new Map(planned.filter((p) => p.kind === 'OBJECT').map((p) => [p.name, p.label ?? p.name]));
   const inFolder = new Map(planned.filter((p) => p.kind === 'METADATA').map((p) => [p.name, !!p.inFolder]));
   items.sort((a, b) => (order.get(`${a.kind}:${a.name}`) ?? 1e9) - (order.get(`${b.kind}:${b.name}`) ?? 1e9));
 
@@ -367,7 +391,7 @@ async function executeRun(run: ClaimedRun, connection: OrgConnection, lost: () =
       try {
         result =
           item.kind === 'OBJECT'
-            ? await exportObject(gw, item.name, { relDir: rel, wantIncremental, baseline: baselines.get(item.name) ?? null })
+            ? await exportObject(gw, item.name, { relDir: rel, wantIncremental, baseline: baselines.get(item.name) ?? null, objectLabel: objectLabel.get(item.name) })
             : await exportMetadataType(gw, item.name, inFolder.get(item.name) ?? false, rel);
         break;
       } catch (e) {

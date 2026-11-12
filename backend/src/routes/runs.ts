@@ -1,4 +1,7 @@
-import { basename, posix } from 'node:path';
+import { createReadStream } from 'node:fs';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, join, posix } from 'node:path';
 import archiver from 'archiver';
 import { Router } from 'express';
 import { prisma } from '../db.js';
@@ -7,6 +10,8 @@ import { signToken, verifyToken } from '../lib/crypto.js';
 import { HttpError, wrap } from '../lib/http.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { getStorage, guardTenantPath, runRelDir } from '../backup/storage.js';
+import { CATEGORIES, categoryOfItem, isCategoryId, metadataTypeLabel } from '../backup/categories.js';
+import { buildExport, type ExportItem } from '../backup/export/package.js';
 
 export const runsRouter = Router();
 export const downloadsRouter = Router();
@@ -68,10 +73,13 @@ runsRouter.get(
           rows: run.items.filter((i) => i.kind === 'OBJECT').reduce((a, i) => a + (i.rowCount ?? 0), 0),
           bytes: run.items.reduce((a, i) => a + (i.bytes ?? 0), 0),
         },
+        categories: CATEGORIES.map((c) => ({ id: c.id, kind: c.kind, order: c.order, label: c.label, description: c.description })),
         items: run.items.map((i) => ({
           id: i.id,
           kind: i.kind,
           name: i.name,
+          label: i.kind === 'METADATA' ? metadataTypeLabel(i.name) : i.name,
+          category: categoryOfItem(i.kind as 'OBJECT' | 'METADATA', i.name),
           status: i.status,
           expectedCount: i.expectedCount,
           rowCount: i.rowCount,
@@ -89,6 +97,17 @@ runsRouter.get(
   }),
 );
 
+type DownloadToken = {
+  t: string;
+  r: string;
+  i: string | null;
+  /** "structured" = the readable Excel/CSV copy. Missing = the raw archive. */
+  k?: 'structured';
+  f?: 'xlsx' | 'csv';
+  c?: string;
+  h?: 'label' | 'api';
+}
+
 /** Gives a short-lived signed link. The link works without a cookie, for 10 minutes only. */
 runsRouter.post(
   '/:id/download-link',
@@ -102,19 +121,111 @@ runsRouter.post(
       const item = await prisma.backupItem.findFirst({ where: { id: itemId, runId: run.id, tenantId: run.tenantId } });
       if (!item || !item.filePath) throw new HttpError(404, 'That item has no saved file.');
     }
-    const { token, expiresAt } = signToken({ t: run.tenantId, r: run.id, i: itemId ?? null }, 600);
-    await audit(run.tenantId, req.user!.id, 'backup.download-link', run.id, itemId ?? 'whole run');
+    const structured = req.body?.kind === 'structured';
+    const payload: DownloadToken = { t: run.tenantId, r: run.id, i: itemId ?? null };
+    let what = itemId ?? 'whole run';
+    if (structured) {
+      if (run.status === 'QUEUED' || run.status === 'RUNNING') throw new HttpError(409, 'This backup is still running. Download it when it has finished.');
+      const format = req.body?.format === 'csv' ? 'csv' : 'xlsx';
+      const category = typeof req.body?.category === 'string' ? req.body.category : undefined;
+      if (category && !isCategoryId(category)) throw new HttpError(400, 'Unknown section.');
+      payload.k = 'structured';
+      payload.f = format;
+      payload.h = req.body?.headers === 'api' ? 'api' : 'label';
+      if (category) payload.c = category;
+      what = `${what} (${format}${category ? `, ${category}` : ''})`;
+    }
+    const { token, expiresAt } = signToken({ ...payload }, 600);
+    await audit(run.tenantId, req.user!.id, structured ? 'backup.export-link' : 'backup.download-link', run.id, what);
     res.json({ url: `/api/downloads/${token}`, expiresAt });
   }),
 );
 
+// Building a workbook reads the whole backup, so only a few run at once.
+let activeExports = 0;
+const MAX_EXPORTS = 2;
+
+const MIME: Record<string, string> = {
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  csv: 'text/csv; charset=utf-8',
+};
+
+type RunWithOrg = {
+  id: string; tenantId: string; connectionId: string; status: string; mode: string; createdAt: Date; finishedAt: Date | null; message: string | null;
+  connection: { label: string; username: string };
+};
+
+async function sendStructured(res: import('express').Response, run: RunWithOrg, payload: DownloadToken) {
+  if (activeExports >= MAX_EXPORTS) throw new HttpError(429, 'Other downloads are being prepared. Try again in a minute.');
+  const rows = await prisma.backupItem.findMany({ where: { runId: run.id, tenantId: run.tenantId } });
+  const items: ExportItem[] = rows.map((i) => ({
+    id: i.id, kind: i.kind, name: i.name, status: i.status, expectedCount: i.expectedCount, rowCount: i.rowCount,
+    filePath: i.filePath, note: i.note, error: i.error, mode: i.mode, changedCount: i.changedCount, deletedCount: i.deletedCount,
+  }));
+  activeExports++;
+  const outDir = await mkdtemp(join(tmpdir(), 'cb-export-'));
+  let released = false;
+  const cleanup = () => {
+    if (released) return;
+    released = true;
+    activeExports--;
+    void rm(outDir, { recursive: true, force: true }).catch(() => undefined);
+  };
+  try {
+    const result = await buildExport({
+      run,
+      orgLabel: run.connection.label,
+      orgUsername: run.connection.username,
+      items,
+      format: payload.f ?? 'xlsx',
+      headers: payload.h ?? 'label',
+      category: payload.c,
+      itemId: payload.i ?? undefined,
+      outDir,
+    });
+    if (result.files.length === 0) throw new HttpError(404, 'There is nothing to export for this selection.');
+    res.on('close', cleanup);
+    if (result.files.length === 1) {
+      const name = basename(result.files[0]);
+      const abs = join(result.rootDir, result.files[0]);
+      const size = (await stat(abs)).size;
+      const ext = name.split('.').pop() ?? 'xlsx';
+      res.setHeader('Content-Type', MIME[ext] ?? 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/[^A-Za-z0-9_. ()-]/g, '_')}"`);
+      res.setHeader('Content-Length', String(size));
+      createReadStream(abs).pipe(res);
+      return;
+    }
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${result.rootName.replace(/[^A-Za-z0-9_. -]/g, '_')}.zip"`);
+    const zip = archiver('zip', { zlib: { level: 1 } });
+    zip.on('error', (e) => {
+      console.error('zip error', e.message);
+      res.destroy(e);
+    });
+    zip.pipe(res);
+    zip.directory(result.rootDir, payload.c || payload.i ? false : result.rootName);
+    await zip.finalize();
+  } catch (e) {
+    cleanup();
+    throw e;
+  }
+}
+
 downloadsRouter.get(
   '/:token',
   wrap(async (req, res) => {
-    const payload = verifyToken<{ t: string; r: string; i: string | null }>(req.params.token);
+    const payload = verifyToken<DownloadToken>(req.params.token);
     if (!payload) throw new HttpError(403, 'This download link is invalid or has expired.');
-    const run = await prisma.backupRun.findFirst({ where: { id: payload.r, tenantId: payload.t } });
+    const run = await prisma.backupRun.findFirst({
+      where: { id: payload.r, tenantId: payload.t },
+      include: { connection: { select: { label: true, username: true } } },
+    });
     if (!run) throw new HttpError(404, 'Backup run not found.');
+    if (payload.k === 'structured') {
+      await sendStructured(res, run, payload);
+      return;
+    }
 
     if (payload.i) {
       const item = await prisma.backupItem.findFirst({ where: { id: payload.i, runId: run.id, tenantId: run.tenantId } });

@@ -15,6 +15,8 @@ export interface ObjectInfo {
 
 export interface FieldInfo {
   name: string;
+  /** The name people see in Salesforce (for example "Billing City"). */
+  label?: string;
   type: string;
   compoundFieldName?: string | null;
 }
@@ -114,7 +116,7 @@ class JsforceGateway implements SfGateway {
 
   async describeFields(objectName: string): Promise<FieldInfo[]> {
     const d = await this.conn.sobject(objectName).describe();
-    return d.fields.map((f) => ({ name: f.name, type: f.type, compoundFieldName: f.compoundFieldName }));
+    return d.fields.map((f) => ({ name: f.name, label: f.label, type: f.type, compoundFieldName: f.compoundFieldName }));
   }
 
   async countRows(objectName: string): Promise<number> {
