@@ -24,7 +24,7 @@ function ItemRow({ i, kind, exportOk, busy, onDownload }: { i: RunItem; kind: 'd
         {title !== i.name && <div className="hint mono">{i.name}</div>}
         {i.error && <div className="err">{i.error}</div>}
         {i.note && <div className="hint">{i.note}</div>}
-        {i.mode === 'INCREMENTAL' && (
+        {i.mode === 'INCREMENTAL' && !i.note?.startsWith('Incremental:') && (
           <div className="hint">Incremental: {(i.changedCount ?? 0).toLocaleString()} changed, {(i.deletedCount ?? 0).toLocaleString()} deleted since the last backup</div>
         )}
       </td>
